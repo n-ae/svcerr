@@ -1,5 +1,7 @@
 # svcerr
 
+[![CI](https://github.com/n-ae/svcerr/actions/workflows/ci.yml/badge.svg)](https://github.com/n-ae/svcerr/actions/workflows/ci.yml)
+
 Typed application errors for Go services: error codes, HTTP status mapping,
 JSON/HTML response writers, panic-recovery middleware, and stack trace
 capture — with no dependency on any specific logging library.
