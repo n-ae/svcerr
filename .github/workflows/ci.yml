@@ -35,7 +35,10 @@ jobs:
             echo "$fmt"
             exit 1
           fi
-      # go vet and go test both compile every package, so a separate
-      # `go build ./...` step would just repeat work they already do.
-      - run: go vet ./...
+      # golangci-lint's default linter set includes govet, so this also
+      # covers what a standalone `go vet ./...` step would (plus errcheck,
+      # staticcheck, unused, ineffassign).
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
       - run: go test ./...
