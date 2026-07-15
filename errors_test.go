@@ -183,6 +183,27 @@ func TestExternalAPIError(t *testing.T) {
 	}
 }
 
+func TestWrapExternalAPIError(t *testing.T) {
+	originalErr := errors.New("connection reset")
+	wrappedErr := WrapExternalAPIError(originalErr, "yahoo", "https://fantasysports.yahooapis.com/...", 503)
+
+	if wrappedErr.Code() != ErrCodeExternalAPI {
+		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeExternalAPI)
+	}
+	if wrappedErr.Service != "yahoo" {
+		t.Errorf("Service = %v, want yahoo", wrappedErr.Service)
+	}
+	if wrappedErr.StatusCode != 503 {
+		t.Errorf("StatusCode = %v, want 503", wrappedErr.StatusCode)
+	}
+	if wrappedErr.URL != "https://fantasysports.yahooapis.com/..." {
+		t.Errorf("URL = %v, want the yahoo URL", wrappedErr.URL)
+	}
+	if !errors.Is(wrappedErr, originalErr) {
+		t.Error("errors.Is() failed")
+	}
+}
+
 func TestAuthenticationError(t *testing.T) {
 	tests := []struct {
 		name     string
