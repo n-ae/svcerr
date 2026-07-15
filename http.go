@@ -111,6 +111,15 @@ func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
 	_, _ = w.Write([]byte(html))
 }
 
+// UserMessage returns the safe, user-facing message for an error - the same
+// sanitized text WriteHTTPError/WriteHTTPErrorHTML send (e.g. a wrapped
+// database error's raw cause is never included), for callers that need to
+// embed it in a custom response fragment instead of one of those two
+// standard bodies.
+func UserMessage(err error) string {
+	return getUserFriendlyMessage(GetErrorCode(err), err)
+}
+
 // getUserFriendlyMessage returns a user-friendly error message
 func getUserFriendlyMessage(code ErrorCode, err error) string {
 	// If it's a known error type, use its message

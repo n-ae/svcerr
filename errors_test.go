@@ -534,6 +534,23 @@ func TestHTTPHelpersUnwrapWrappedErrors(t *testing.T) {
 	}
 }
 
+func TestUserMessage(t *testing.T) {
+	inner := NewNotFoundError("league", "12345")
+	wrapped := fmt.Errorf("lookup failed: %w", inner)
+
+	if got, want := UserMessage(inner), inner.Error(); got != want {
+		t.Errorf("UserMessage(inner) = %q, want %q", got, want)
+	}
+	if got, want := UserMessage(wrapped), inner.Error(); got != want {
+		t.Errorf("UserMessage(wrapped) = %q, want %q", got, want)
+	}
+
+	plain := errors.New("boom")
+	if got, want := UserMessage(plain), "An internal error occurred. Please contact support if the problem persists."; got != want {
+		t.Errorf("UserMessage(plain) = %q, want %q", got, want)
+	}
+}
+
 // loggerFunc adapts a plain function to the Logger interface for tests.
 type loggerFunc func(level Level, err error, fields map[string]interface{}, msg string)
 
