@@ -218,7 +218,7 @@ type ExternalAPIError struct {
 	Service    string // caller-defined service name, e.g. "yahoo", "nba_stats"
 	StatusCode int
 	URL        string
-	RetryAfter *int // seconds to retry after
+	RetryAfter *int // seconds to retry after; not set by the constructors, assign it directly when known
 }
 
 // NewExternalAPIError creates a new external API error

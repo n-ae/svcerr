@@ -2,6 +2,7 @@ package errors
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -80,7 +81,8 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Add Retry-After header for rate limit errors
-	if rle, ok := err.(*RateLimitError); ok {
+	var rle *RateLimitError
+	if errors.As(err, &rle) {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 	}
 
@@ -114,14 +116,14 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 	// If it's a known error type, use its message
 	if err != nil {
 		// For validation errors, include field information
-		if ve, ok := err.(*ValidationError); ok {
-			if ve.Field != "" {
-				return ve.Error()
-			}
+		var ve *ValidationError
+		if errors.As(err, &ve) && ve.Field != "" {
+			return ve.Error()
 		}
 
 		// For other custom errors, return their message
-		if ewc, ok := err.(ErrorWithCode); ok {
+		var ewc ErrorWithCode
+		if errors.As(err, &ewc) {
 			return ewc.Error()
 		}
 	}
@@ -162,34 +164,40 @@ func extractErrorDetails(err error) map[string]interface{} {
 	details := make(map[string]interface{})
 
 	// Extract details from custom error types
-	switch e := err.(type) {
-	case *ValidationError:
-		if e.Field != "" {
-			details["field"] = e.Field
+	var ve *ValidationError
+	var de *DatabaseError
+	var ee *ExternalAPIError
+	var ne *NotFoundError
+	var rle *RateLimitError
+
+	switch {
+	case errors.As(err, &ve):
+		if ve.Field != "" {
+			details["field"] = ve.Field
 		}
-		if e.Value != nil {
-			details["value"] = e.Value
+		if ve.Value != nil {
+			details["value"] = ve.Value
 		}
-	case *DatabaseError:
-		if e.Operation != "" {
-			details["operation"] = e.Operation
+	case errors.As(err, &de):
+		if de.Operation != "" {
+			details["operation"] = de.Operation
 		}
-	case *ExternalAPIError:
-		details["service"] = e.Service
-		if e.StatusCode > 0 {
-			details["status_code"] = e.StatusCode
+	case errors.As(err, &ee):
+		details["service"] = ee.Service
+		if ee.StatusCode > 0 {
+			details["status_code"] = ee.StatusCode
 		}
-		if e.RetryAfter != nil {
-			details["retry_after"] = *e.RetryAfter
+		if ee.RetryAfter != nil {
+			details["retry_after"] = *ee.RetryAfter
 		}
-	case *NotFoundError:
-		details["resource_type"] = e.ResourceType
-		if e.ResourceID != "" {
-			details["resource_id"] = e.ResourceID
+	case errors.As(err, &ne):
+		details["resource_type"] = ne.ResourceType
+		if ne.ResourceID != "" {
+			details["resource_id"] = ne.ResourceID
 		}
-	case *RateLimitError:
-		details["limit"] = e.Limit
-		details["retry_after"] = e.RetryAfter
+	case errors.As(err, &rle):
+		details["limit"] = rle.Limit
+		details["retry_after"] = rle.RetryAfter
 	}
 
 	if len(details) == 0 {
@@ -223,19 +231,25 @@ func logError(logger Logger, err error, statusCode int) {
 	}
 
 	// Add type-specific context
-	switch e := err.(type) {
-	case *ValidationError:
-		fields["field"] = e.Field
-	case *DatabaseError:
-		fields["db_operation"] = e.Operation
-	case *ExternalAPIError:
-		fields["service"] = e.Service
-		fields["service_status"] = e.StatusCode
-	case *AuthenticationError:
-		fields["auth_reason"] = e.Reason
-	case *NotFoundError:
-		fields["resource_type"] = e.ResourceType
-		fields["resource_id"] = e.ResourceID
+	var ve *ValidationError
+	var de *DatabaseError
+	var ee *ExternalAPIError
+	var ae *AuthenticationError
+	var ne *NotFoundError
+
+	switch {
+	case errors.As(err, &ve):
+		fields["field"] = ve.Field
+	case errors.As(err, &de):
+		fields["db_operation"] = de.Operation
+	case errors.As(err, &ee):
+		fields["service"] = ee.Service
+		fields["service_status"] = ee.StatusCode
+	case errors.As(err, &ae):
+		fields["auth_reason"] = ae.Reason
+	case errors.As(err, &ne):
+		fields["resource_type"] = ne.ResourceType
+		fields["resource_id"] = ne.ResourceID
 	}
 
 	logger.Log(level, err, fields, "HTTP error response")

@@ -2,6 +2,8 @@ package errors
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -420,7 +422,7 @@ func TestGetStackTrace(t *testing.T) {
 	// Stack should contain this test function
 	found := false
 	for _, frame := range stack {
-		if contains(frame, "TestGetStackTrace") {
+		if strings.Contains(frame, "TestGetStackTrace") {
 			found = true
 			break
 		}
@@ -504,18 +506,37 @@ func TestMultipleErrorWrapping(t *testing.T) {
 	}
 }
 
-// Helper function
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-			findSubstring(s, substr)))
+func TestHTTPHelpersUnwrapWrappedErrors(t *testing.T) {
+	// getUserFriendlyMessage, extractErrorDetails, and logError use
+	// errors.As rather than a raw type assertion, so they must still
+	// find type-specific details when the error is wrapped (e.g. by a
+	// caller doing fmt.Errorf("...: %w", err)) instead of passed as-is.
+	inner := NewValidationError("invalid email", "email", "not-an-email")
+	wrapped := fmt.Errorf("request failed: %w", inner)
+
+	msg := getUserFriendlyMessage(GetErrorCode(wrapped), wrapped)
+	if msg != inner.Error() {
+		t.Errorf("getUserFriendlyMessage() = %q, want %q", msg, inner.Error())
+	}
+
+	details := extractErrorDetails(wrapped)
+	if details["field"] != "email" {
+		t.Errorf("extractErrorDetails()[\"field\"] = %v, want email", details["field"])
+	}
+
+	var loggedFields map[string]interface{}
+	logError(loggerFunc(func(_ Level, _ error, fields map[string]interface{}, _ string) {
+		loggedFields = fields
+	}), wrapped, http.StatusBadRequest)
+
+	if loggedFields["field"] != "email" {
+		t.Errorf("logError() fields[\"field\"] = %v, want email", loggedFields["field"])
+	}
 }
 
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+// loggerFunc adapts a plain function to the Logger interface for tests.
+type loggerFunc func(level Level, err error, fields map[string]interface{}, msg string)
+
+func (f loggerFunc) Log(level Level, err error, fields map[string]interface{}, msg string) {
+	f(level, err, fields, msg)
 }
