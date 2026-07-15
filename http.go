@@ -124,6 +124,14 @@ func UserMessage(err error) string {
 func getUserFriendlyMessage(code ErrorCode, err error) string {
 	// If it's a known error type, use its message
 	if err != nil {
+		// An explicit SetPublicMessage override always wins.
+		var pm publicMessager
+		if errors.As(err, &pm) {
+			if msg, ok := pm.PublicMessage(); ok {
+				return msg
+			}
+		}
+
 		// For validation errors, include field information
 		var ve *ValidationError
 		if errors.As(err, &ve) && ve.Field != "" {

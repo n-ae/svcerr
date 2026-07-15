@@ -84,6 +84,39 @@ has a `New*`/`Wrap*` constructor, carries an `ErrorCode`, and supports
 doc comment in [`errors.go`](errors.go) for the full list of codes and their
 HTTP status mapping.
 
+### Public vs. internal messages
+
+By default the client-facing message is either the error's own `Error()`
+text or a generic per-code default — usually fine, but sometimes `Error()`
+carries detail (a raw query, an internal hostname) you'd log but not want to
+send back to a client. `SetPublicMessage` overrides just the client-facing
+side for that one error instance; the logged error is untouched:
+
+```go
+err := errors.WrapDatabaseError(dbErr, "query", "SELECT * FROM leagues...")
+err.SetPublicMessage("We're having trouble reaching the database. Please try again shortly.")
+return err // WriteHTTPError/UserMessage now send the override; logs still get err.Error()
+```
+
+### Wrapping constructors in your own helper
+
+Every `New*`/`Wrap*` constructor assumes it's called directly from the site
+its stack trace should point at. If you wrap one in your own helper (e.g. a
+project-wide validation function), the trace ends up pointing at the helper
+instead of its caller. Fix that with `RecaptureStackTrace`, called from
+inside the helper right after construction:
+
+```go
+func validateTeamID(id string) error {
+	if id == "" {
+		err := errors.NewValidationError("team_id is required", "team_id", nil)
+		errors.RecaptureStackTrace(err, 1) // point past this helper
+		return err
+	}
+	return nil
+}
+```
+
 ### Logging
 
 `WriteHTTPError`, `WriteHTTPErrorHTML`, and `RecoveryMiddleware` log through

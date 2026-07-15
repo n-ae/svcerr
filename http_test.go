@@ -126,6 +126,23 @@ func TestWriteHTTPError(t *testing.T) {
 		}
 	})
 
+	t.Run("SetPublicMessage overrides the response message", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewDatabaseError("query", "pq: connection to 10.0.4.12:5432 refused")
+		err.SetPublicMessage("We're having trouble reaching the database. Please try again shortly.")
+
+		WriteHTTPError(w, err, logger)
+
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if resp.Error.Message != "We're having trouble reaching the database. Please try again shortly." {
+			t.Errorf("Error.Message = %q, want the public message override, not the internal detail", resp.Error.Message)
+		}
+	})
+
 	t.Run("no Retry-After header for non-rate-limit errors", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}

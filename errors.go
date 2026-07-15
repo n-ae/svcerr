@@ -69,11 +69,12 @@ type ErrorWithCode interface {
 
 // BaseError provides common error functionality
 type BaseError struct {
-	code       ErrorCode
-	message    string
-	cause      error
-	stackTrace []string
-	context    map[string]interface{}
+	code          ErrorCode
+	message       string
+	cause         error
+	stackTrace    []string
+	context       map[string]interface{}
+	publicMessage string
 }
 
 // Code returns the error code
@@ -104,6 +105,28 @@ func (e *BaseError) Context() map[string]interface{} {
 	return e.context
 }
 
+// SetPublicMessage overrides the message WriteHTTPError, WriteHTTPErrorHTML,
+// and UserMessage show the client for this error instance, so the logged
+// Error() text (which may carry internal detail) and the client-facing text
+// can differ. Unset by default, in which case those functions fall back to
+// their normal behavior (the error's own message, or a default per-code
+// message).
+func (e *BaseError) SetPublicMessage(msg string) {
+	e.publicMessage = msg
+}
+
+// PublicMessage returns the message set by SetPublicMessage, and whether
+// one was set at all.
+func (e *BaseError) PublicMessage() (string, bool) {
+	return e.publicMessage, e.publicMessage != ""
+}
+
+// publicMessager is implemented by every BaseError-derived type via
+// promotion; getUserFriendlyMessage checks it through errors.As.
+type publicMessager interface {
+	PublicMessage() (string, bool)
+}
+
 // stackPathSegments is the number of trailing path segments kept when
 // shortening a stack frame's file path (e.g. "internal/errors/http.go").
 const stackPathSegments = 3
@@ -130,6 +153,34 @@ func captureStackTrace(skip int) []string {
 		stack = append(stack, fmt.Sprintf("%s:%d %s", file, line, fn.Name()))
 	}
 	return stack
+}
+
+// setStackTrace lets RecaptureStackTrace overwrite the trace captured at
+// construction time.
+func (e *BaseError) setStackTrace(s []string) {
+	e.stackTrace = s
+}
+
+// stackTraceSetter is implemented by every BaseError-derived type via
+// promotion; RecaptureStackTrace checks it through errors.As.
+type stackTraceSetter interface {
+	setStackTrace([]string)
+}
+
+// RecaptureStackTrace re-captures err's stack trace starting extraSkip
+// frames higher than the normal New*/Wrap* capture point. Every
+// constructor in this package assumes it's called directly from the site
+// the trace should point at; if you wrap a constructor in your own helper
+// function, the trace ends up pointing at that helper instead of its
+// caller. Call RecaptureStackTrace(err, 1) from inside such a helper,
+// immediately after constructing err, to fix that - err must be one of
+// this package's error types (or wrap one); otherwise this is a no-op.
+func RecaptureStackTrace(err error, extraSkip int) {
+	var setter stackTraceSetter
+	if !errors.As(err, &setter) {
+		return
+	}
+	setter.setStackTrace(captureStackTrace(2 + extraSkip))
 }
 
 // ValidationError represents input validation errors

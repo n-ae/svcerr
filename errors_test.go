@@ -474,6 +474,62 @@ func TestErrorWrapping(t *testing.T) {
 	}
 }
 
+func TestPublicMessage(t *testing.T) {
+	err := NewDatabaseError("query", "connection to 10.0.4.12:5432 refused")
+
+	if msg, ok := err.PublicMessage(); ok || msg != "" {
+		t.Errorf("PublicMessage() = (%q, %v), want (\"\", false) before SetPublicMessage", msg, ok)
+	}
+
+	err.SetPublicMessage("We're having trouble reaching the database. Please try again shortly.")
+
+	msg, ok := err.PublicMessage()
+	if !ok {
+		t.Fatal("PublicMessage() ok = false after SetPublicMessage")
+	}
+	if msg != "We're having trouble reaching the database. Please try again shortly." {
+		t.Errorf("PublicMessage() = %q, unexpected", msg)
+	}
+
+	// getUserFriendlyMessage (and so UserMessage/WriteHTTPError) must
+	// prefer the override over err.Error(), even through a wrap.
+	if got := getUserFriendlyMessage(err.Code(), err); got != msg {
+		t.Errorf("getUserFriendlyMessage() = %q, want the public message override %q", got, msg)
+	}
+	if got := UserMessage(err); got != msg {
+		t.Errorf("UserMessage() = %q, want the public message override %q", got, msg)
+	}
+
+	wrapped := fmt.Errorf("service layer: %w", err)
+	if got := UserMessage(wrapped); got != msg {
+		t.Errorf("UserMessage(wrapped) = %q, want the public message override %q (should unwrap via errors.As)", got, msg)
+	}
+}
+
+func TestRecaptureStackTrace(t *testing.T) {
+	// newViaHelper mimics a caller wrapping a constructor in their own
+	// helper function - without RecaptureStackTrace, the trace's top
+	// frame would be this helper, not TestRecaptureStackTrace.
+	newViaHelper := func() *InternalError {
+		err := NewInternalError("test", "boom")
+		RecaptureStackTrace(err, 1)
+		return err
+	}
+
+	err := newViaHelper()
+	stack := err.StackTrace()
+	if len(stack) == 0 {
+		t.Fatal("StackTrace() is empty")
+	}
+	if !strings.Contains(stack[0], "TestRecaptureStackTrace") {
+		t.Errorf("stack[0] = %q, want it to reference TestRecaptureStackTrace (the helper's caller), not the helper", stack[0])
+	}
+
+	// A non-svcerr error is left untouched rather than panicking.
+	plain := errors.New("plain")
+	RecaptureStackTrace(plain, 1)
+}
+
 func TestErrorContext(t *testing.T) {
 	err := NewValidationError("test error", "email", "invalid@")
 
