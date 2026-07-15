@@ -51,7 +51,7 @@ func HTTPStatusCode(code ErrorCode) int {
 		return http.StatusServiceUnavailable
 
 	// Internal errors -> 500 Internal Server Error
-	case ErrCodeInternal, ErrCodePanic, ErrCodeNotImplemented:
+	case ErrCodeInternal, ErrCodeNotImplemented:
 		return http.StatusInternalServerError
 
 	default:

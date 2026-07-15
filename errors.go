@@ -53,10 +53,10 @@ const (
 	ErrCodeRateLimitExceeded ErrorCode = "RATE_LIMIT_EXCEEDED"
 	ErrCodeQuotaExceeded     ErrorCode = "QUOTA_EXCEEDED"
 
-	// Internal errors (9xxx)
+	// Internal errors (9xxx). RecoveryMiddleware reports recovered panics
+	// as ErrCodeInternal too - there's no separate panic-specific code.
 	ErrCodeInternal       ErrorCode = "INTERNAL_ERROR"
 	ErrCodeNotImplemented ErrorCode = "NOT_IMPLEMENTED"
-	ErrCodePanic          ErrorCode = "PANIC"
 )
 
 // ErrorWithCode interface for errors that have application-specific codes

@@ -32,7 +32,6 @@ func TestHTTPStatusCode(t *testing.T) {
 		{ErrCodeDatabaseTransaction, http.StatusServiceUnavailable},
 		{ErrCodeDatabaseMigration, http.StatusServiceUnavailable},
 		{ErrCodeInternal, http.StatusInternalServerError},
-		{ErrCodePanic, http.StatusInternalServerError},
 		{ErrCodeNotImplemented, http.StatusInternalServerError},
 		{ErrorCode("SOMETHING_UNKNOWN"), http.StatusInternalServerError},
 	}
