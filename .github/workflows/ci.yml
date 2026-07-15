@@ -6,17 +6,27 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel a run's older in-progress attempt when a new commit lands on the
+# same branch/PR, so superseded runs stop burning billable minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.5"
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./...
+          # Single source of truth for the Go version - stays in sync with
+          # go.mod automatically, no separate version to bump here.
+          go-version-file: go.mod
+          # Caches the module and build cache keyed on go.sum (default on,
+          # kept explicit since it's the main lever on run duration here).
+          cache: true
+      # Fails fast on the cheapest check before spending time on vet/test.
       - name: Check formatting
         run: |
           fmt="$(gofmt -l .)"
@@ -25,3 +35,7 @@ jobs:
             echo "$fmt"
             exit 1
           fi
+      # go vet and go test both compile every package, so a separate
+      # `go build ./...` step would just repeat work they already do.
+      - run: go vet ./...
+      - run: go test ./...
