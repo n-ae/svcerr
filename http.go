@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 )
 
@@ -61,11 +62,19 @@ func HTTPStatusCode(code ErrorCode) int {
 
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
-	// Extract error details
+	statusCode := writeJSONErrorBody(w, err)
+	logError(logger, err, statusCode)
+}
+
+// writeJSONErrorBody writes err's JSON body and headers to w and returns the
+// status code used, without logging. Split out of WriteHTTPError so
+// RecoveryMiddleware can write the response and log the panic as a single
+// record instead of the response write and the log call each logging
+// independently.
+func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 	code := GetErrorCode(err)
 	statusCode := HTTPStatusCode(code)
 
-	// Build error response
 	errResp := HTTPErrorResponse{
 		Error: ErrorDetail{
 			Code:    code,
@@ -74,10 +83,6 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 		},
 	}
 
-	// Log error with context
-	logError(logger, err, statusCode)
-
-	// Set headers
 	w.Header().Set("Content-Type", "application/json")
 
 	// Add Retry-After header for rate limit errors
@@ -88,27 +93,33 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(errResp)
+
+	return statusCode
 }
 
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
+	statusCode := writeHTMLErrorBody(w, err)
+	logError(logger, err, statusCode)
+}
+
+// writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
+func writeHTMLErrorBody(w http.ResponseWriter, err error) int {
 	code := GetErrorCode(err)
 	statusCode := HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
 
-	// Log error
-	logError(logger, err, statusCode)
-
-	// Write simple HTML response
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 
-	html := `<div class="error-message" role="alert">` +
+	body := `<div class="error-message" role="alert">` +
 		`<h3>Error</h3>` +
-		`<p>` + message + `</p>` +
+		`<p>` + html.EscapeString(message) + `</p>` +
 		`</div>`
 
-	_, _ = w.Write([]byte(html))
+	_, _ = w.Write([]byte(body))
+
+	return statusCode
 }
 
 // UserMessage returns the safe, user-facing message for an error - the same
@@ -132,15 +143,18 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 			}
 		}
 
-		// For validation errors, include field information
-		var ve *ValidationError
-		if errors.As(err, &ve) && ve.Field != "" {
-			return ve.Error()
-		}
-
-		// For other custom errors, return their message
+		// Error() is only safe to surface as-is when the error wasn't
+		// built by wrapping another error (Wrap*) - a wrapped cause's
+		// text may carry internal detail (raw SQL, connection strings,
+		// third-party error text) that must never reach a client without
+		// an explicit SetPublicMessage override.
 		var ewc ErrorWithCode
-		if errors.As(err, &ewc) {
+		if errors.As(err, &ewc) && ewc.Unwrap() == nil {
+			// For validation errors, include field information
+			var ve *ValidationError
+			if errors.As(err, &ve) && ve.Field != "" {
+				return ve.Error()
+			}
 			return ewc.Error()
 		}
 	}
@@ -192,9 +206,9 @@ func extractErrorDetails(err error) map[string]interface{} {
 		if ve.Field != "" {
 			details["field"] = ve.Field
 		}
-		if ve.Value != nil {
-			details["value"] = ve.Value
-		}
+		// ve.Value is deliberately not included here - it's whatever the
+		// caller passed in (a password, a token, an oversized payload),
+		// and this package has no way to know it's safe to publish.
 	case errors.As(err, &de):
 		if de.Operation != "" {
 			details["operation"] = de.Operation
@@ -223,8 +237,11 @@ func extractErrorDetails(err error) map[string]interface{} {
 	return details
 }
 
-// logError logs error with appropriate level and context
-func logError(logger Logger, err error, statusCode int) {
+// errorLogFields builds the level and structured fields describing err at
+// the given status code. Shared by logError and RecoveryMiddleware, so a
+// recovered panic produces one log record carrying both the panic context
+// and the usual error fields, rather than each logging independently.
+func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 	// Determine log level based on status code
 	level := LevelInfo
 	switch {
@@ -269,37 +286,95 @@ func logError(logger Logger, err error, statusCode int) {
 		fields["resource_id"] = ne.ResourceID
 	}
 
+	return level, fields
+}
+
+// logError logs error with appropriate level and context
+func logError(logger Logger, err error, statusCode int) {
+	level, fields := errorLogFields(err, statusCode)
 	logger.Log(level, err, fields, "HTTP error response")
+}
+
+// trackingResponseWriter records whether a response has already been
+// committed (a header or body written), so RecoveryMiddleware can tell
+// whether it's still safe to write an error response after a panic.
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+	status      int
+}
+
+func (w *trackingResponseWriter) WriteHeader(status int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *trackingResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // Middleware for error recovery and logging
 func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tw := &trackingResponseWriter{ResponseWriter: w}
+
 			defer func() {
-				if rec := recover(); rec != nil {
-					var err error
-					switch v := rec.(type) {
-					case error:
-						err = WrapInternalError(v, "http_handler", "panic recovered")
-					case string:
-						err = NewInternalError("http_handler", v)
-					default:
-						err = NewInternalError("http_handler", "unknown panic")
-					}
-
-					logger.Log(LevelError, err, map[string]interface{}{
-						"panic":       rec,
-						"stack_trace": GetStackTrace(err),
-						"method":      r.Method,
-						"path":        r.URL.Path,
-					}, "Panic recovered in HTTP handler")
-
-					WriteHTTPError(w, err, logger)
+				rec := recover()
+				if rec == nil {
+					return
 				}
+
+				if rec == http.ErrAbortHandler {
+					// Conventionally used (including by net/http itself,
+					// e.g. on client disconnect mid-response) to abort a
+					// request without normal error handling. Let it
+					// continue up the stack rather than logging it and
+					// writing a response.
+					panic(rec)
+				}
+
+				var err error
+				switch v := rec.(type) {
+				case error:
+					err = WrapInternalError(v, "http_handler", "panic recovered")
+				case string:
+					err = NewInternalError("http_handler", "panic recovered")
+				default:
+					err = NewInternalError("http_handler", "unknown panic")
+				}
+
+				if tw.wroteHeader {
+					// The handler already committed a response before
+					// panicking - the status can't be changed at this
+					// point, and writing another body would just corrupt
+					// what was already sent, so only log.
+					_, fields := errorLogFields(err, tw.status)
+					fields["panic"] = rec
+					fields["method"] = r.Method
+					fields["path"] = r.URL.Path
+					fields["response_committed_status"] = tw.status
+					logger.Log(LevelError, err, fields, "Panic recovered in HTTP handler after response was already committed")
+					return
+				}
+
+				statusCode := writeJSONErrorBody(tw, err)
+
+				_, fields := errorLogFields(err, statusCode)
+				fields["panic"] = rec
+				fields["method"] = r.Method
+				fields["path"] = r.URL.Path
+				logger.Log(LevelError, err, fields, "Panic recovered in HTTP handler")
 			}()
 
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(tw, r)
 		})
 	}
 }

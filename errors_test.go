@@ -547,6 +547,38 @@ func TestErrorContext(t *testing.T) {
 	}
 }
 
+func TestErrorContextReturnsCopy(t *testing.T) {
+	err := NewValidationError("test error", "email", "invalid@")
+
+	ctx := err.Context()
+	ctx["field"] = "tampered"
+	ctx["new_key"] = "injected"
+
+	fresh := err.Context()
+	if fresh["field"] != "email" {
+		t.Errorf("Context()[field] = %v after mutating a previous copy, want email (internal state was mutated)", fresh["field"])
+	}
+	if _, ok := fresh["new_key"]; ok {
+		t.Error("Context() reflects a key added to a previously returned copy (internal state was mutated)")
+	}
+}
+
+func TestStackTraceReturnsCopy(t *testing.T) {
+	err := NewInternalError("test", "test error")
+
+	stack := err.StackTrace()
+	if len(stack) == 0 {
+		t.Fatal("StackTrace() is empty")
+	}
+	original := stack[0]
+	stack[0] = "tampered"
+
+	fresh := err.StackTrace()
+	if fresh[0] != original {
+		t.Errorf("StackTrace()[0] = %q after mutating a previous copy, want %q (internal state was mutated)", fresh[0], original)
+	}
+}
+
 func TestStackTraceFiltering(t *testing.T) {
 	err := NewInternalError("test", "test error")
 	stack := err.StackTrace()

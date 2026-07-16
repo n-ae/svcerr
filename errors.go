@@ -95,14 +95,28 @@ func (e *BaseError) Unwrap() error {
 	return e.cause
 }
 
-// StackTrace returns the captured stack trace
+// StackTrace returns a copy of the captured stack trace - callers can't
+// mutate the error's internal state through the returned slice.
 func (e *BaseError) StackTrace() []string {
-	return e.stackTrace
+	if e.stackTrace == nil {
+		return nil
+	}
+	stack := make([]string, len(e.stackTrace))
+	copy(stack, e.stackTrace)
+	return stack
 }
 
-// Context returns the error context
+// Context returns a copy of the error context - callers can't mutate the
+// error's internal state through the returned map.
 func (e *BaseError) Context() map[string]interface{} {
-	return e.context
+	if e.context == nil {
+		return nil
+	}
+	ctx := make(map[string]interface{}, len(e.context))
+	for k, v := range e.context {
+		ctx[k] = v
+	}
+	return ctx
 }
 
 // SetPublicMessage overrides the message WriteHTTPError, WriteHTTPErrorHTML,

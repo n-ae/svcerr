@@ -2,6 +2,7 @@ package errors
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -226,6 +227,88 @@ func TestWriteHTTPErrorHTML(t *testing.T) {
 	}
 }
 
+func TestWriteHTTPErrorHTMLEscapesMessage(t *testing.T) {
+	w := httptest.NewRecorder()
+	logger := &recordingLogger{}
+	err := NewValidationError(`<script>alert("xss")</script>`, "field", nil)
+
+	WriteHTTPErrorHTML(w, err, logger)
+
+	body := w.Body.String()
+	if strings.Contains(body, "<script>") {
+		t.Errorf("body contains unescaped script tag: %s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("body missing escaped message: %s", body)
+	}
+}
+
+func TestWrappedInternalDetailNotLeakedToClient(t *testing.T) {
+	t.Run("WriteHTTPError", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		secret := errors.New("password=hunter2 host=10.0.0.1")
+		err := WrapDatabaseError(secret, "query", "SELECT * FROM users")
+
+		WriteHTTPError(w, err, logger)
+
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked wrapped cause: %s", w.Body.String())
+		}
+	})
+
+	t.Run("panic(error) via RecoveryMiddleware", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic(errors.New("password=hunter2 host=10.0.0.1"))
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked panic value: %s", w.Body.String())
+		}
+	})
+
+	t.Run("panic(string) via RecoveryMiddleware", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic("password=hunter2 host=10.0.0.1")
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked panic value: %s", w.Body.String())
+		}
+	})
+
+	t.Run("ValidationError.Value", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewValidationError("invalid password", "password", "hunter2")
+
+		WriteHTTPError(w, err, logger)
+
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked ValidationError.Value: %s", w.Body.String())
+		}
+
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if _, ok := resp.Error.Details["value"]; ok {
+			t.Errorf("Details contains \"value\" key, want it omitted entirely: %+v", resp.Error.Details)
+		}
+		if resp.Error.Details["field"] != "password" {
+			t.Errorf("Details[field] = %v, want password (field name is still safe to include)", resp.Error.Details["field"])
+		}
+	})
+}
+
 func TestRecoveryMiddleware(t *testing.T) {
 	t.Run("recovers panic(error)", func(t *testing.T) {
 		logger := &recordingLogger{}
@@ -248,19 +331,30 @@ func TestRecoveryMiddleware(t *testing.T) {
 			t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
 		}
 
-		// One call from RecoveryMiddleware's own "Panic recovered" log,
-		// one from WriteHTTPError's "HTTP error response" log.
-		if len(logger.calls) != 2 {
-			t.Fatalf("logger.calls = %d, want 2, got %+v", len(logger.calls), logger.calls)
+		// A single log call carrying both the panic context (method, path,
+		// panic value) and the usual error fields (error_code, http_status,
+		// stack_trace) - not one from RecoveryMiddleware and a second,
+		// separate one from WriteHTTPError's own logging.
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
 		}
 		if logger.calls[0].msg != "Panic recovered in HTTP handler" {
-			t.Errorf("first log msg = %q, want %q", logger.calls[0].msg, "Panic recovered in HTTP handler")
+			t.Errorf("log msg = %q, want %q", logger.calls[0].msg, "Panic recovered in HTTP handler")
 		}
 		if logger.calls[0].fields["method"] != http.MethodGet {
 			t.Errorf("method field = %v, want GET", logger.calls[0].fields["method"])
 		}
 		if logger.calls[0].fields["path"] != "/leagues" {
 			t.Errorf("path field = %v, want /leagues", logger.calls[0].fields["path"])
+		}
+		if logger.calls[0].fields["error_code"] != string(ErrCodeInternal) {
+			t.Errorf("error_code field = %v, want %v", logger.calls[0].fields["error_code"], ErrCodeInternal)
+		}
+		if logger.calls[0].fields["http_status"] != http.StatusInternalServerError {
+			t.Errorf("http_status field = %v, want %v", logger.calls[0].fields["http_status"], http.StatusInternalServerError)
+		}
+		if _, ok := logger.calls[0].fields["stack_trace"]; !ok {
+			t.Error("expected stack_trace field on the panic log")
 		}
 	})
 
@@ -306,6 +400,61 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if len(logger.calls) != 0 {
 			t.Errorf("logger.calls = %d, want 0 (no panic occurred)", len(logger.calls))
+		}
+	})
+
+	t.Run("does not swallow http.ErrAbortHandler", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic(http.ErrAbortHandler)
+		}))
+
+		w := httptest.NewRecorder()
+
+		func() {
+			defer func() {
+				rec := recover()
+				if rec != http.ErrAbortHandler {
+					t.Errorf("recovered %v, want it to re-panic with http.ErrAbortHandler", rec)
+				}
+			}()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			t.Error("ServeHTTP returned normally, want it to panic with http.ErrAbortHandler")
+		}()
+
+		if len(logger.calls) != 0 {
+			t.Errorf("logger.calls = %d, want 0 (ErrAbortHandler should not be logged as an error)", len(logger.calls))
+		}
+	})
+
+	t.Run("response already committed before panic is not appended to", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			panic("boom after commit")
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		// The 200 already sent to the client can't be retracted - the
+		// recorder keeps whatever status was written first.
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d (already committed, can't be changed)", w.Code, http.StatusOK)
+		}
+		if got, want := w.Body.String(), `{"ok":true}`; got != want {
+			t.Errorf("body = %q, want %q (no error JSON should be appended to a committed response)", got, want)
+		}
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
+		}
+		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
+			t.Errorf("response_committed_status field = %v, want %v", logger.calls[0].fields["response_committed_status"], http.StatusOK)
 		}
 	})
 }
