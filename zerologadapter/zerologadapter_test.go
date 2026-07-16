@@ -6,19 +6,19 @@ import (
 	"errors"
 	"testing"
 
-	svcerrors "github.com/n-ae/svcerr"
+	"github.com/n-ae/svcerr"
 	"github.com/rs/zerolog"
 )
 
 func TestLog(t *testing.T) {
 	tests := []struct {
 		name      string
-		level     svcerrors.Level
+		level     svcerr.Level
 		wantLevel string
 	}{
-		{"info", svcerrors.LevelInfo, "info"},
-		{"warn", svcerrors.LevelWarn, "warn"},
-		{"error", svcerrors.LevelError, "error"},
+		{"info", svcerr.LevelInfo, "info"},
+		{"warn", svcerr.LevelWarn, "warn"},
+		{"error", svcerr.LevelError, "error"},
 	}
 
 	for _, tt := range tests {
@@ -53,7 +53,7 @@ func TestLogNilError(t *testing.T) {
 	var buf bytes.Buffer
 	adapter := New(zerolog.New(&buf))
 
-	adapter.Log(svcerrors.LevelInfo, nil, nil, "no error here")
+	adapter.Log(svcerr.LevelInfo, nil, nil, "no error here")
 
 	var got map[string]interface{}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
@@ -72,7 +72,7 @@ func TestLogUnknownLevelDefaultsToInfo(t *testing.T) {
 	var buf bytes.Buffer
 	adapter := New(zerolog.New(&buf))
 
-	adapter.Log(svcerrors.Level(99), nil, nil, "msg")
+	adapter.Log(svcerr.Level(99), nil, nil, "msg")
 
 	var got map[string]interface{}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {

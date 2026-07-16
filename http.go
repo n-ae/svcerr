@@ -1,4 +1,4 @@
-package errors
+package svcerr
 
 import (
 	"encoding/json"

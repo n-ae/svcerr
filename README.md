@@ -24,10 +24,10 @@ func (s *Service) GetLeague(id string) (*League, error) {
 	var league League
 	err := s.db.QueryRow(`SELECT * FROM leagues WHERE id = ?`, id).Scan(&league)
 	if err == sql.ErrNoRows {
-		return nil, errors.NewNotFoundError("league", id)
+		return nil, svcerr.NewNotFoundError("league", id)
 	}
 	if err != nil {
-		return nil, errors.WrapDatabaseError(err, "query", "SELECT * FROM leagues...")
+		return nil, svcerr.WrapDatabaseError(err, "query", "SELECT * FROM leagues...")
 	}
 	return &league, nil
 }
@@ -35,8 +35,8 @@ func (s *Service) GetLeague(id string) (*League, error) {
 func (h *Handler) GetLeague(w http.ResponseWriter, r *http.Request) {
 	league, err := h.service.GetLeague(r.URL.Query().Get("id"))
 	if err != nil {
-		// h.logger implements errors.Logger - see "Logging" below
-		errors.WriteHTTPError(w, err, h.logger) // maps to the right status, logs, writes JSON
+		// h.logger implements svcerr.Logger - see "Logging" below
+		svcerr.WriteHTTPError(w, err, h.logger) // maps to the right status, logs, writes JSON
 		return
 	}
 	json.NewEncoder(w).Encode(league)
@@ -60,10 +60,17 @@ endpoints. `UserMessage(err)` returns just the sanitized message, for
 callers embedding it in a custom response.
 
 Check error types with stdlib `errors.As` — there's no per-type `IsXError`
-wrapper:
+wrapper. `svcerr` is a distinct package name (not `errors`), so both imports
+coexist without an alias:
 
 ```go
-var nfErr *errors.NotFoundError
+import (
+	"errors"
+
+	"github.com/n-ae/svcerr"
+)
+
+var nfErr *svcerr.NotFoundError
 if errors.As(err, &nfErr) {
 	// ...
 }
@@ -72,7 +79,7 @@ if errors.As(err, &nfErr) {
 Recover panics in HTTP handlers and turn them into a proper error response:
 
 ```go
-router.Use(errors.RecoveryMiddleware(h.logger))
+router.Use(svcerr.RecoveryMiddleware(h.logger))
 ```
 
 ### Error types
@@ -80,17 +87,17 @@ router.Use(errors.RecoveryMiddleware(h.logger))
 `ValidationError`, `DatabaseError`, `ExternalAPIError`, `AuthenticationError`,
 `NotFoundError`, `ConflictError`, `RateLimitError`, `InternalError` — each
 has a `New*`/`Wrap*` constructor, carries an `ErrorCode`, and supports
-`errors.Is`/`errors.As`/`errors.Unwrap` in the usual way. See the package
-doc comment in [`errors.go`](errors.go) for the full list of codes and their
-HTTP status mapping.
+stdlib `errors.Is`/`errors.As`/`errors.Unwrap` in the usual way. See the
+package doc comment in [`errors.go`](errors.go) for the full list of codes
+and their HTTP status mapping.
 
 For a code with no dedicated constructor (e.g. `ErrCodeDatabaseConnection`,
 `ErrCodeMissingRequired`, `ErrCodeResourceConflict`, `ErrCodeQuotaExceeded`),
 use the generic `New`/`Wrap`:
 
 ```go
-err := errors.New(errors.ErrCodeDatabaseConnection, "could not reach the database")
-err := errors.Wrap(dbErr, errors.ErrCodeDatabaseConnection, "could not reach the database")
+err := svcerr.New(svcerr.ErrCodeDatabaseConnection, "could not reach the database")
+err := svcerr.Wrap(dbErr, svcerr.ErrCodeDatabaseConnection, "could not reach the database")
 ```
 
 ### Public vs. internal messages
@@ -104,7 +111,7 @@ never want in a response. `SetPublicMessage` overrides the client-facing
 text explicitly, for either case:
 
 ```go
-err := errors.WrapDatabaseError(dbErr, "query", "SELECT * FROM leagues...")
+err := svcerr.WrapDatabaseError(dbErr, "query", "SELECT * FROM leagues...")
 err.SetPublicMessage("We're having trouble reaching the database. Please try again shortly.")
 return err // WriteHTTPError/UserMessage now send the override; logs still get err.Error()
 ```
@@ -120,8 +127,8 @@ inside the helper right after construction:
 ```go
 func validateTeamID(id string) error {
 	if id == "" {
-		err := errors.NewValidationError("team_id is required", "team_id", nil)
-		errors.RecaptureStackTrace(err, 1) // point past this helper
+		err := svcerr.NewValidationError("team_id is required", "team_id", nil)
+		svcerr.RecaptureStackTrace(err, 1) // point past this helper
 		return err
 	}
 	return nil
@@ -145,7 +152,7 @@ Using [zerolog](https://github.com/rs/zerolog)? Wrap it with the
 ```go
 import "github.com/n-ae/svcerr/zerologadapter"
 
-errors.WriteHTTPError(w, err, zerologadapter.New(logger))
+svcerr.WriteHTTPError(w, err, zerologadapter.New(logger))
 ```
 
 For any other logger, implement the one-method `Logger` interface directly.

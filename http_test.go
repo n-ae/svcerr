@@ -1,4 +1,4 @@
-package errors
+package svcerr
 
 import (
 	"encoding/json"
@@ -232,8 +232,8 @@ func TestWriteHTTPError(t *testing.T) {
 }
 
 // stdlibError is a bare error type (not *BaseError-derived), to exercise the
-// "unknown error" fallback path independent of the errors package's own
-// New()/errors.New value type.
+// "unknown error" fallback path independent of this package's own New()/
+// stdlib errors.New value type.
 type stdlibError string
 
 func (e stdlibError) Error() string { return string(e) }

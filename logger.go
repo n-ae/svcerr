@@ -1,4 +1,4 @@
-package errors
+package svcerr
 
 // Level is a log severity, independent of any specific logging library.
 type Level int

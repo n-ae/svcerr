@@ -1,4 +1,4 @@
-// Package errors provides custom error types for consistent error handling.
+// Package svcerr provides custom error types for consistent error handling.
 //
 // Error types: ValidationError, DatabaseError, ExternalAPIError, AuthenticationError,
 // NotFoundError, ConflictError, RateLimitError, InternalError.
@@ -9,7 +9,7 @@
 // WriteHTTPErrorHTML, and RecoveryMiddleware log through the Logger interface -
 // pass an adapter for whatever logger the caller uses (see the zerologadapter
 // subpackage for a zerolog adapter).
-package errors
+package svcerr
 
 import (
 	"errors"
