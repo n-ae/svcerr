@@ -21,24 +21,42 @@ jobs:
       # that the root module stays dependency-free for callers who never
       # import it - that also means it's invisible to the root's `./...`
       # and needs its own checkout of this same pipeline.
+      #
+      # The go axis enforces each module's go.mod floor continuously
+      # instead of leaving it aspirational: "floor" installs exactly the
+      # version the go directive declares (root: 1.20, chosen by our own
+      # newest stdlib usage; zerologadapter: dictated upward by zerolog's
+      # dependency chain, currently golang.org/x/sys), "stable" is the
+      # current Go release.
       matrix:
         module: [., zerologadapter]
+        go: [floor, stable]
     defaults:
       run:
         working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
+        if: matrix.go == 'floor'
         with:
-          # Single source of truth for the Go version - stays in sync with
-          # each module's own go.mod automatically, no separate version to
-          # bump here.
+          # Single source of truth for the floor - stays in sync with each
+          # module's own go.mod automatically, no separate version to bump
+          # here.
           go-version-file: ${{ matrix.module }}/go.mod
           # Caches the module and build cache keyed on go.sum (default on,
           # kept explicit since it's the main lever on run duration here).
           cache: true
-      # Fails fast on the cheapest check before spending time on vet/test.
+      - uses: actions/setup-go@v6
+        if: matrix.go == 'stable'
+        with:
+          go-version: stable
+          cache: true
+      # Formatting and lint run only on stable: gofmt output is defined by
+      # the toolchain that runs it, and golangci-lint's typecheck needs a
+      # recent Go - the floor cells exist to prove the tests build and pass
+      # at the declared minimum, not to re-run style checks.
       - name: Check formatting
+        if: matrix.go == 'stable'
         run: |
           fmt="$(gofmt -l .)"
           if [ -n "$fmt" ]; then
@@ -50,6 +68,7 @@ jobs:
       # covers what a standalone `go vet ./...` step would (plus errcheck,
       # staticcheck, unused, ineffassign).
       - uses: golangci/golangci-lint-action@v9
+        if: matrix.go == 'stable'
         with:
           version: v2.12.2
           working-directory: ${{ matrix.module }}
