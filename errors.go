@@ -224,8 +224,11 @@ func (e *BaseError) PublicMessage() (string, bool) {
 // this error's built-in type already contributes (e.g. NotFoundError's
 // resource_type/resource_id) - or, for a code with no dedicated type (New/
 // Wrap), the only source of details at all. Unlike SetPublicMessage, this
-// can be called more than once to add several keys.
+// can be called more than once to add several keys. Whichever of
+// SetPublicDetail/RemovePublicDetail was called most recently for a given
+// key wins - calling this after RemovePublicDetail(key) un-suppresses it.
 func (e *BaseError) SetPublicDetail(key string, value interface{}) {
+	delete(e.publicDetailRemovals, key)
 	if e.publicDetailAdditions == nil {
 		e.publicDetailAdditions = map[string]interface{}{}
 	}
@@ -235,8 +238,11 @@ func (e *BaseError) SetPublicDetail(key string, value interface{}) {
 // RemovePublicDetail suppresses key from the structured "details" map,
 // even if this error's built-in type would otherwise include it - e.g.
 // hiding NotFoundError's resource_id when the identifier itself is
-// sensitive (an email address, say).
+// sensitive (an email address, say). Whichever of SetPublicDetail/
+// RemovePublicDetail was called most recently for a given key wins -
+// calling this after SetPublicDetail(key, ...) un-does that addition.
 func (e *BaseError) RemovePublicDetail(key string) {
+	delete(e.publicDetailAdditions, key)
 	if e.publicDetailRemovals == nil {
 		e.publicDetailRemovals = map[string]struct{}{}
 	}

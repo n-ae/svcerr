@@ -563,6 +563,86 @@ func TestWriteHTTPErrorHTMLEscapesMessage(t *testing.T) {
 	}
 }
 
+func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {
+	// A handler that set headers for a would-be successful response (a
+	// precomputed Content-Length, a Trailer announcement) before panicking
+	// or returning an error must not have those survive onto the actual
+	// error body - the same reasoning as net/http's own http.Error, which
+	// deletes Content-Length for exactly this case.
+	for name, write := range map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			w.Header().Set("Content-Length", "999")
+			w.Header().Set("Trailer", "X-Would-Have-Been-A-Trailer")
+
+			write(w, NewInternalError("test", "boom"), nil)
+
+			if got := w.Header().Get("Content-Length"); got != "" {
+				t.Errorf("Content-Length = %q, want cleared (stale value from before the error, doesn't match the actual body of %d bytes)", got, w.Body.Len())
+			}
+			if got := w.Header().Get("Trailer"); got != "" {
+				t.Errorf("Trailer = %q, want cleared (no trailers are actually sent)", got)
+			}
+			if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+		})
+	}
+}
+
+func TestWriteJSONFallsBackOnUnencodableDetail(t *testing.T) {
+	// SetPublicDetail accepts an arbitrary value; if it can't be
+	// JSON-encoded, WriteJSON must not silently commit a status claiming
+	// success with an empty or broken body.
+	w := httptest.NewRecorder()
+	err := New(ErrCodeInvalidInput, "invalid")
+	err.SetPublicDetail("bad", make(chan int))
+
+	status := WriteJSON(w, err)
+
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d (the fallback status, not the original error's %d)", status, http.StatusInternalServerError, http.StatusBadRequest)
+	}
+	if w.Code != status {
+		t.Errorf("w.Code = %d, want it to match the returned status %d", w.Code, status)
+	}
+
+	var resp HTTPErrorResponse
+	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %q)", decErr, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeInternal {
+		t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+	}
+}
+
+func TestWriteProblemFallsBackOnUnencodableDetail(t *testing.T) {
+	w := httptest.NewRecorder()
+	err := New(ErrCodeInvalidInput, "invalid")
+	err.SetPublicDetail("bad", make(chan int))
+
+	status := WriteProblem(w, err)
+
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", status, http.StatusInternalServerError)
+	}
+
+	var resp map[string]interface{}
+	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %q)", decErr, w.Body.String())
+	}
+	if resp["code"] != string(ErrCodeInternal) {
+		t.Errorf(`resp["code"] = %v, want %q`, resp["code"], ErrCodeInternal)
+	}
+	if resp["status"] != float64(http.StatusInternalServerError) {
+		t.Errorf(`resp["status"] = %v, want %d`, resp["status"], http.StatusInternalServerError)
+	}
+}
+
 func TestWriteHTTPErrorToleratesNilLogger(t *testing.T) {
 	// A nil Logger must not panic - callers who only want the response
 	// rendered (no logging contract) can pass nil instead of a no-op

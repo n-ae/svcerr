@@ -731,6 +731,54 @@ func TestPublicDetailAdditionsAndRemovals(t *testing.T) {
 			t.Errorf("extractErrorDetails() = %v, want nil", got)
 		}
 	})
+
+	t.Run("SetPublicDetail after RemovePublicDetail un-suppresses the key", func(t *testing.T) {
+		err := NewNotFoundError("user", "secret@example.com")
+		err.RemovePublicDetail("resource_id")
+		err.SetPublicDetail("resource_id", "safe-id-123")
+
+		got := extractErrorDetails(err)
+		if got["resource_id"] != "safe-id-123" {
+			t.Errorf(`details["resource_id"] = %v, want "safe-id-123" (the later SetPublicDetail should win)`, got["resource_id"])
+		}
+	})
+
+	t.Run("RemovePublicDetail after SetPublicDetail re-suppresses the key", func(t *testing.T) {
+		err := New(ErrCodeConstraintViolation, "out of stock")
+		err.SetPublicDetail("sku", "WIDGET-42")
+		err.RemovePublicDetail("sku")
+
+		got := extractErrorDetails(err)
+		if _, present := got["sku"]; present {
+			t.Errorf(`details["sku"] = %v, want the key entirely absent (the later RemovePublicDetail should win)`, got["sku"])
+		}
+	})
+
+	t.Run("RemovePublicDetail alone does not redact the identifier from message", func(t *testing.T) {
+		// NewNotFoundError's own message embeds resourceID directly, and
+		// NOT_FOUND is a category mayExposeOwnMessage shows by default -
+		// RemovePublicDetail only touches the details map. This documents
+		// the gap the README warns about, not a desired outcome.
+		err := NewNotFoundError("user", "secret@example.com")
+		err.RemovePublicDetail("resource_id")
+
+		if got := UserMessage(err); !strings.Contains(got, "secret@example.com") {
+			t.Errorf("UserMessage() = %q, want it to still contain the identifier (documenting that RemovePublicDetail alone doesn't redact message)", got)
+		}
+	})
+
+	t.Run("RemovePublicDetail plus SetPublicMessage fully redacts the identifier", func(t *testing.T) {
+		err := NewNotFoundError("user", "secret@example.com")
+		err.RemovePublicDetail("resource_id")
+		err.SetPublicMessage("user was not found")
+
+		if got := UserMessage(err); strings.Contains(got, "secret@example.com") {
+			t.Errorf("UserMessage() = %q, leaked the identifier despite SetPublicMessage", got)
+		}
+		if got := extractErrorDetails(err); got["resource_id"] != nil {
+			t.Errorf(`details["resource_id"] = %v, want absent`, got["resource_id"])
+		}
+	})
 }
 
 func TestProblemTypeAndInstanceOverrides(t *testing.T) {

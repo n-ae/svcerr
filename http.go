@@ -138,19 +138,71 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	// Marshal before committing anything, so a value that can't be
+	// JSON-encoded (a channel, a func, a cyclic structure passed to
+	// SetPublicDetail, ...) doesn't leave a status already written and an
+	// empty or truncated body - the caller would see a "successful" write
+	// with no way to know the document is broken.
+	body, marshalErr := json.Marshal(errResp)
+	if marshalErr != nil {
+		statusCode = http.StatusInternalServerError
+		body = fallbackErrorBody(ErrCodeInternal)
+	}
+
+	prepareErrorHeaders(w.Header(), "application/json")
 
 	// Add Retry-After header for rate limit errors - keyed off the same
 	// outermost-coded node as extractErrorDetails, so an outer wrapper's
-	// code can't inherit a wrapped RateLimitError's header.
-	if rle, ok := outermostCoded(err).(*RateLimitError); ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+	// code can't inherit a wrapped RateLimitError's header. Skipped on the
+	// marshal-failure fallback: that response no longer represents err's
+	// own classification.
+	if marshalErr == nil {
+		if rle, ok := outermostCoded(err).(*RateLimitError); ok {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+		}
 	}
 
 	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(errResp)
+	_, _ = w.Write(body)
 
 	return statusCode
+}
+
+// prepareErrorHeaders resets the response headers this package's writers
+// need to be correct, in case the handler already set headers expecting a
+// successful response before panicking or returning an error - net/http's
+// own http.Error does the same for Content-Length, for the same reason.
+// Content-Length is deleted because the body about to be written is a
+// different size than whatever the handler may have declared, and a stale
+// value can cause client-side truncation or a real server's
+// ResponseWriter to reject or truncate the write. Trailer is deleted
+// because any trailers it announced won't be sent, since this response
+// has none.
+//
+// This deliberately doesn't touch Content-Encoding, ETag, Last-Modified,
+// or Accept-Ranges, matching http.Error's own scope - deleting
+// Content-Encoding in particular could interfere with an outer compression
+// middleware that wraps this package's writers and coordinates through
+// that header.
+func prepareErrorHeaders(h http.Header, contentType string) {
+	h.Del("Content-Length")
+	h.Del("Trailer")
+	h.Set("Content-Type", contentType)
+	h.Set("X-Content-Type-Options", "nosniff")
+}
+
+// fallbackErrorBody returns the always-encodable JSON body writeJSONErrorBody
+// substitutes when the real response failed to marshal - built from
+// defaultMessageForCode's plain per-code string, never from err or any
+// caller-supplied detail value, so json.Marshal here cannot itself fail.
+func fallbackErrorBody(code ErrorCode) []byte {
+	body, _ := json.Marshal(HTTPErrorResponse{
+		Error: ErrorDetail{
+			Code:    code,
+			Message: defaultMessageForCode(code),
+		},
+	})
+	return body
 }
 
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
@@ -170,7 +222,7 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error) int {
 	statusCode := HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 
 	body := `<div class="error-message" role="alert">` +
@@ -267,16 +319,37 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 		Extensions: extractErrorDetails(err),
 	}
 
-	w.Header().Set("Content-Type", "application/problem+json")
+	body, marshalErr := json.Marshal(problem)
+	if marshalErr != nil {
+		statusCode = http.StatusInternalServerError
+		body = fallbackProblemBody(statusCode)
+	}
 
-	if rle, ok := node.(*RateLimitError); ok {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+	prepareErrorHeaders(w.Header(), "application/problem+json")
+
+	if marshalErr == nil {
+		if rle, ok := node.(*RateLimitError); ok {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+		}
 	}
 
 	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(problem)
+	_, _ = w.Write(body)
 
 	return statusCode
+}
+
+// fallbackProblemBody mirrors fallbackErrorBody for the problem+json body -
+// built from fixed fields and http.StatusText, never from err or any
+// caller-supplied detail value, so json.Marshal here cannot itself fail.
+func fallbackProblemBody(statusCode int) []byte {
+	body, _ := json.Marshal(ProblemDetails{
+		Type:   "about:blank",
+		Title:  http.StatusText(statusCode),
+		Status: statusCode,
+		Code:   ErrCodeInternal,
+	})
+	return body
 }
 
 // UserMessage returns the safe, user-facing message for an error - the same

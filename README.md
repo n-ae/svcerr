@@ -238,15 +238,28 @@ so on (never anything caller-supplied and unbounded, like
 `SetPublicDetail`/`RemovePublicDetail` let you add to or suppress that on
 a specific error instance, and are the only way to get structured details
 at all for a code built with the generic `New`/`Wrap` (which have no
-built-in type to extract from):
+built-in type to extract from). Calling either again for the same key
+later - even after the other one - changes your mind: whichever call was
+most recent wins.
 
 ```go
-err := svcerr.NewNotFoundError("user", customerEmail)
-err.RemovePublicDetail("resource_id") // the identifier itself is sensitive here
-
 err := svcerr.New(svcerr.ErrCodeConstraintViolation, "out of stock")
 err.SetPublicDetail("sku", sku)
 err.SetPublicDetail("available", 0)
+```
+
+**`RemovePublicDetail` only touches the `details` map - not the
+message.** `NewNotFoundError(resourceType, resourceID)`'s own message
+embeds `resourceID` directly (`"user not found: secret@example.com"`), and
+`NOT_FOUND` is a category `mayExposeOwnMessage` shows by default (see
+"Public vs. internal messages" above) - so `RemovePublicDetail` alone
+still leaves the identifier in `message`. If the identifier itself is
+sensitive, pair it with `SetPublicMessage`:
+
+```go
+err := svcerr.NewNotFoundError("user", customerEmail)
+err.RemovePublicDetail("resource_id")     // removes it from details...
+err.SetPublicMessage("user was not found") // ...and this removes it from message
 ```
 
 ### Wrapping constructors in your own helper
