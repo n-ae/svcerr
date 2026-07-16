@@ -1,8 +1,10 @@
 package svcerr
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,6 +45,31 @@ func TestHTTPStatusCode(t *testing.T) {
 				t.Errorf("HTTPStatusCode(%q) = %d, want %d", tt.code, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRegisterStatusCode(t *testing.T) {
+	const custom ErrorCode = "MY_APP_CUSTOM_CODE"
+	t.Cleanup(func() {
+		customStatusMu.Lock()
+		delete(customStatusCode, custom)
+		delete(customStatusCode, ErrCodeNotFound)
+		customStatusMu.Unlock()
+	})
+
+	if got := HTTPStatusCode(custom); got != http.StatusInternalServerError {
+		t.Fatalf("HTTPStatusCode(%q) before registering = %d, want the default %d", custom, got, http.StatusInternalServerError)
+	}
+
+	RegisterStatusCode(custom, http.StatusTeapot)
+	if got := HTTPStatusCode(custom); got != http.StatusTeapot {
+		t.Errorf("HTTPStatusCode(%q) after registering = %d, want %d", custom, got, http.StatusTeapot)
+	}
+
+	// Registering a built-in code overrides it too.
+	RegisterStatusCode(ErrCodeNotFound, http.StatusTeapot)
+	if got := HTTPStatusCode(ErrCodeNotFound); got != http.StatusTeapot {
+		t.Errorf("HTTPStatusCode(ErrCodeNotFound) after override = %d, want %d", got, http.StatusTeapot)
 	}
 }
 
@@ -364,6 +391,78 @@ func TestWriteHTTPErrorHTML(t *testing.T) {
 	}
 }
 
+func TestWriteHTTPProblem(t *testing.T) {
+	t.Run("standard members plus flattened extensions", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewNotFoundError("league", "12345")
+
+		WriteHTTPProblem(w, err, logger)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
+			t.Errorf("Content-Type = %q, want application/problem+json", ct)
+		}
+
+		var resp map[string]interface{}
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+		}
+		if resp["type"] != "about:blank" {
+			t.Errorf(`resp["type"] = %v, want "about:blank"`, resp["type"])
+		}
+		if resp["title"] != "The requested resource was not found." {
+			t.Errorf(`resp["title"] = %v, want the code-generic message`, resp["title"])
+		}
+		if resp["status"] != float64(http.StatusNotFound) {
+			t.Errorf(`resp["status"] = %v, want %d`, resp["status"], http.StatusNotFound)
+		}
+		if resp["detail"] != "league not found: 12345" {
+			t.Errorf(`resp["detail"] = %v, want "league not found: 12345"`, resp["detail"])
+		}
+		if resp["code"] != string(ErrCodeNotFound) {
+			t.Errorf(`resp["code"] = %v, want %q`, resp["code"], ErrCodeNotFound)
+		}
+		if resp["resource_type"] != "league" {
+			t.Errorf(`resp["resource_type"] = %v, want "league" (extractErrorDetails' extension members flattened to top level)`, resp["resource_type"])
+		}
+		if _, ok := resp["instance"]; ok {
+			t.Errorf(`resp["instance"] = %v, want the key omitted entirely when unset`, resp["instance"])
+		}
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+	})
+
+	t.Run("does not leak the wrapped cause", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		secret := errors.New("password=hunter2 host=10.0.0.1")
+		err := WrapDatabaseError(secret, "query", "SELECT * FROM users")
+
+		WriteHTTPProblem(w, err, logger)
+
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked wrapped cause: %s", w.Body.String())
+		}
+	})
+
+	t.Run("rate limit error sets Retry-After header", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewRateLimitError("yahoo", 300, 60)
+
+		WriteHTTPProblem(w, err, logger)
+
+		if got := w.Header().Get("Retry-After"); got != "60" {
+			t.Errorf("Retry-After = %q, want 60", got)
+		}
+	})
+}
+
 func TestWriteHTTPErrorHTMLEscapesMessage(t *testing.T) {
 	w := httptest.NewRecorder()
 	logger := &recordingLogger{}
@@ -442,6 +541,69 @@ func TestWrappedInternalDetailNotLeakedToClient(t *testing.T) {
 		}
 		if resp.Error.Details["field"] != "password" {
 			t.Errorf("Details[field] = %v, want password (field name is still safe to include)", resp.Error.Details["field"])
+		}
+	})
+}
+
+// hijackableRecorder wraps httptest.ResponseRecorder (which doesn't
+// implement http.Hijacker) to also support hijacking, for testing
+// trackingResponseWriter's passthrough.
+type hijackableRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	server, _ := net.Pipe()
+	return server, bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)), nil
+}
+
+func TestTrackingResponseWriterFlush(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	f, ok := (http.ResponseWriter)(tw).(http.Flusher)
+	if !ok {
+		t.Fatal("trackingResponseWriter should implement http.Flusher")
+	}
+	f.Flush()
+
+	if !rec.Flushed {
+		t.Error("Flush() did not delegate to the underlying ResponseWriter")
+	}
+}
+
+func TestTrackingResponseWriterHijack(t *testing.T) {
+	t.Run("underlying writer does not support hijacking", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		tw := &trackingResponseWriter{ResponseWriter: rec}
+
+		hj, ok := (http.ResponseWriter)(tw).(http.Hijacker)
+		if !ok {
+			t.Fatal("trackingResponseWriter should structurally implement http.Hijacker")
+		}
+		if _, _, err := hj.Hijack(); err == nil {
+			t.Error("Hijack() error = nil, want an error since the underlying writer doesn't support hijacking")
+		}
+	})
+
+	t.Run("successful hijack delegates and marks the response committed", func(t *testing.T) {
+		underlying := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		tw := &trackingResponseWriter{ResponseWriter: underlying}
+
+		hj := (http.ResponseWriter)(tw).(http.Hijacker)
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		if !underlying.hijacked {
+			t.Error("Hijack() did not delegate to the underlying ResponseWriter")
+		}
+		if !tw.wroteHeader {
+			t.Error("a successful Hijack() should mark the response committed, so RecoveryMiddleware won't write a JSON body over the now-raw connection")
 		}
 	})
 }
@@ -622,6 +784,35 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
 			t.Errorf("response_committed_status field = %v, want %v (Write alone should default the tracked status to 200)", logger.calls[0].fields["response_committed_status"], http.StatusOK)
+		}
+	})
+
+	t.Run("hijacked connection is not written to on a later panic", func(t *testing.T) {
+		logger := &recordingLogger{}
+		underlying := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("handler's ResponseWriter does not implement http.Hijacker")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("Hijack() error = %v", err)
+			}
+			_ = conn.Close()
+			panic("boom after hijack")
+		}))
+
+		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if underlying.Body.Len() != 0 {
+			t.Errorf("body = %q, want empty (nothing should be written to a hijacked connection)", underlying.Body.String())
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
 		}
 	})
 }

@@ -57,8 +57,30 @@ func (h *Handler) GetLeague(w http.ResponseWriter, r *http.Request) {
 ```
 
 `WriteHTTPErrorHTML` writes an HTML fragment instead, for HTMX-style
-endpoints. `UserMessage(err)` returns just the sanitized message, for
-callers embedding it in a custom response.
+endpoints. `WriteHTTPProblem` writes an
+[RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) `application/problem+json`
+body instead, for clients that expect the standard problem-details shape:
+
+```json
+{
+  "type": "about:blank",
+  "title": "The requested resource was not found.",
+  "status": 404,
+  "detail": "league not found: 12345",
+  "code": "NOT_FOUND",
+  "resource_type": "league",
+  "resource_id": "12345"
+}
+```
+
+`title` is the generic, code-level description; `detail` is specific to
+this occurrence (and follows the same public/internal message rules as
+`WriteHTTPError` - see "Public vs. internal messages" below). Extension
+members (`code`, `resource_type`, `resource_id`, ...) sit at the top level,
+per RFC 9457, rather than nested under a sub-object.
+
+`UserMessage(err)` returns just the sanitized message, for callers
+embedding it in a custom response.
 
 Check error types with stdlib `errors.As` — there's no per-type `IsXError`
 wrapper. `svcerr` is a distinct package name (not `errors`), so both imports
@@ -83,6 +105,13 @@ Recover panics in HTTP handlers and turn them into a proper error response:
 router.Use(svcerr.RecoveryMiddleware(h.logger))
 ```
 
+`RecoveryMiddleware` tracks whether the handler already wrote a response
+before panicking, and won't write an error body over one that's already
+committed - it just logs in that case. It also passes through
+`http.Flusher` and `http.Hijacker`, so SSE handlers and WebSocket upgrades
+still work for handlers wrapped by the middleware; a successful hijack is
+itself treated as committing the response.
+
 ### Error types
 
 `ValidationError`, `DatabaseError`, `ExternalAPIError`, `AuthenticationError`,
@@ -100,6 +129,46 @@ use the generic `New`/`Wrap`:
 err := svcerr.New(svcerr.ErrCodeDatabaseConnection, "could not reach the database")
 err := svcerr.Wrap(dbErr, svcerr.ErrCodeDatabaseConnection, "could not reach the database")
 ```
+
+For an application-specific code entirely outside this package's built-in
+set, register its HTTP status once, at startup:
+
+```go
+const ErrCodeOutOfStock svcerr.ErrorCode = "OUT_OF_STOCK"
+
+func init() {
+	svcerr.RegisterStatusCode(ErrCodeOutOfStock, http.StatusConflict)
+}
+```
+
+`RegisterStatusCode` can also override a built-in code's mapping, for a
+deployment that wants different semantics than the default.
+
+### Custom error types
+
+You don't have to embed `BaseError` to plug into this package - implement
+just the capability you need:
+
+```go
+type Coder interface {
+	Code() ErrorCode // GetErrorCode, HTTPStatusCode
+}
+
+type StackTracer interface {
+	StackTrace() []string // GetStackTrace
+}
+
+type PublicMessager interface {
+	PublicMessage() (string, bool) // getUserFriendlyMessage / UserMessage overrides
+}
+```
+
+A minimal type implementing `Coder` (and `error`) is enough to get correct
+status-code mapping from `WriteHTTPError`/`WriteHTTPProblem`; add `Unwrap()
+error` if you also want the "don't leak a wrapped cause" safety property.
+`ErrorWithCode` is the full combination `BaseError`-derived types implement
+(plus `StackTracer`), kept as a single name for convenience - it's not a
+requirement for participating in the package's functions.
 
 ### Public vs. internal messages
 
@@ -138,8 +207,9 @@ func validateTeamID(id string) error {
 
 ### Logging
 
-`WriteHTTPError`, `WriteHTTPErrorHTML`, and `RecoveryMiddleware` log through
-a minimal `Logger` interface, not a specific logging library:
+`WriteHTTPError`, `WriteHTTPErrorHTML`, `WriteHTTPProblem`, and
+`RecoveryMiddleware` log through a minimal `Logger` interface, not a
+specific logging library:
 
 ```go
 type Logger interface {

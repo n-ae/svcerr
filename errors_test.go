@@ -498,6 +498,73 @@ func TestGetStackTrace(t *testing.T) {
 	}
 }
 
+// minimalCodedError implements only Coder (Code() ErrorCode) plus the
+// standard error interface - not Unwrap or StackTrace - to verify
+// GetErrorCode/HTTPStatusCode work with the narrower Coder capability
+// instead of requiring the full ErrorWithCode.
+type minimalCodedError struct {
+	code ErrorCode
+	msg  string
+}
+
+func (e *minimalCodedError) Error() string   { return e.msg }
+func (e *minimalCodedError) Code() ErrorCode { return e.code }
+
+func TestGetErrorCodeWithMinimalCoderType(t *testing.T) {
+	err := &minimalCodedError{code: ErrCodeNotFound, msg: "widget not found"}
+
+	if got := GetErrorCode(err); got != ErrCodeNotFound {
+		t.Errorf("GetErrorCode() = %v, want %v (a Coder-only type should be recognized)", got, ErrCodeNotFound)
+	}
+	if got := HTTPStatusCode(GetErrorCode(err)); got != http.StatusNotFound {
+		t.Errorf("HTTPStatusCode(GetErrorCode(err)) = %d, want %d", got, http.StatusNotFound)
+	}
+
+	// No StackTrace() method - GetStackTrace must degrade gracefully
+	// instead of requiring it too.
+	if got := GetStackTrace(err); got != nil {
+		t.Errorf("GetStackTrace() = %v, want nil for a type with no StackTrace method", got)
+	}
+}
+
+// minimalCodedUnwrappableError implements Coder, error, and Unwrap, but not
+// StackTracer - to verify getUserFriendlyMessage/UserMessage's safety
+// property (never surface a wrapped cause's text without an explicit
+// override) doesn't require the full ErrorWithCode either.
+type minimalCodedUnwrappableError struct {
+	code  ErrorCode
+	msg   string
+	cause error
+}
+
+func (e *minimalCodedUnwrappableError) Error() string {
+	if e.cause != nil {
+		return e.msg + ": " + e.cause.Error()
+	}
+	return e.msg
+}
+func (e *minimalCodedUnwrappableError) Code() ErrorCode { return e.code }
+func (e *minimalCodedUnwrappableError) Unwrap() error   { return e.cause }
+
+func TestUserMessageWithMinimalCoderUnwrapperType(t *testing.T) {
+	secret := errors.New("password=hunter2")
+	wrapped := &minimalCodedUnwrappableError{code: ErrCodeDatabaseQuery, msg: "query failed", cause: secret}
+
+	got := UserMessage(wrapped)
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("UserMessage() = %q, leaked the wrapped cause even though this type isn't the full ErrorWithCode", got)
+	}
+	if want := defaultMessageForCode(ErrCodeDatabaseQuery); got != want {
+		t.Errorf("UserMessage() = %q, want the generic default %q", got, want)
+	}
+
+	// No cause - its own text is safe to surface, same rule as Wrap*/New.
+	plain := &minimalCodedUnwrappableError{code: ErrCodeNotFound, msg: "widget 42 not found"}
+	if got := UserMessage(plain); got != "widget 42 not found" {
+		t.Errorf("UserMessage() = %q, want the error's own text (no cause)", got)
+	}
+}
+
 func TestErrorWrapping(t *testing.T) {
 	originalErr := errors.New("original error")
 	wrappedErr := WrapDatabaseError(originalErr, "query", "SELECT...")

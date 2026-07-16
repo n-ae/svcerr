@@ -4,6 +4,10 @@
 // NotFoundError, ConflictError, RateLimitError, InternalError.
 //
 // All types implement ErrorWithCode interface and support error wrapping.
+// A custom error type doesn't need to embed BaseError to participate -
+// implementing just Coder, StackTracer, or PublicMessager independently is
+// enough for the corresponding functions (GetErrorCode/HTTPStatusCode,
+// GetStackTrace, and the public-message overrides) to recognize it.
 //
 // This package's own code imports no logging library: WriteHTTPError,
 // WriteHTTPErrorHTML, and RecoveryMiddleware log through the Logger
@@ -61,12 +65,41 @@ const (
 	ErrCodeNotImplemented ErrorCode = "NOT_IMPLEMENTED"
 )
 
-// ErrorWithCode interface for errors that have application-specific codes
+// Coder is implemented by any error that carries an application-specific
+// ErrorCode - the minimal capability GetErrorCode and HTTPStatusCode need.
+// A custom error type only needs this one method to participate in status
+// mapping; unlike ErrorWithCode, it doesn't also require Unwrap or
+// StackTrace.
+type Coder interface {
+	Code() ErrorCode
+}
+
+// StackTracer is implemented by any error that can report a captured stack
+// trace - the minimal capability GetStackTrace needs.
+type StackTracer interface {
+	StackTrace() []string
+}
+
+// PublicMessager is implemented by any error with a client-facing message
+// distinct from its logged Error() text - the minimal capability
+// getUserFriendlyMessage needs to honor SetPublicMessage-style overrides.
+// BaseError (and so every type in this package) implements it via
+// SetPublicMessage/PublicMessage.
+type PublicMessager interface {
+	PublicMessage() (string, bool)
+}
+
+// ErrorWithCode is the full capability set every type in this package
+// implements via BaseError: Coder and StackTracer, plus error and Unwrap.
+// Prefer the narrower Coder, StackTracer, or PublicMessager when writing a
+// custom error type that doesn't want to embed BaseError - GetErrorCode,
+// GetStackTrace, and getUserFriendlyMessage each check the capability they
+// need independently, not this combined interface.
 type ErrorWithCode interface {
 	error
-	Code() ErrorCode
+	Coder
 	Unwrap() error
-	StackTrace() []string
+	StackTracer
 }
 
 // BaseError provides common error functionality
@@ -137,11 +170,15 @@ func (e *BaseError) PublicMessage() (string, bool) {
 	return e.publicMessage, e.publicMessage != ""
 }
 
-// publicMessager is implemented by every BaseError-derived type via
-// promotion; getUserFriendlyMessage checks it through errors.As.
-type publicMessager interface {
-	PublicMessage() (string, bool)
-}
+// Compile-time checks that BaseError - and so every type in this package,
+// which all embed it - satisfies each capability interface individually as
+// well as their combination.
+var (
+	_ Coder          = (*BaseError)(nil)
+	_ StackTracer    = (*BaseError)(nil)
+	_ PublicMessager = (*BaseError)(nil)
+	_ ErrorWithCode  = (*BaseError)(nil)
+)
 
 // stackPathSegments is the number of trailing path segments kept when
 // shortening a stack frame's file path (e.g. "internal/errors/http.go").
@@ -503,20 +540,24 @@ func WrapInternalError(err error, component, message string) *InternalError {
 // here - use stdlib errors.As(err, &target) directly, which does the same
 // thing without a per-type wrapper to maintain.
 
-// GetErrorCode extracts the error code from an error
+// GetErrorCode extracts the error code from an error. It only requires
+// Coder, not the full ErrorWithCode - a custom error type that implements
+// just Code() ErrorCode is picked up here (and so by HTTPStatusCode) even
+// if it doesn't also implement Unwrap or StackTrace.
 func GetErrorCode(err error) ErrorCode {
-	var ewc ErrorWithCode
-	if errors.As(err, &ewc) {
-		return ewc.Code()
+	var c Coder
+	if errors.As(err, &c) {
+		return c.Code()
 	}
 	return ErrCodeInternal
 }
 
-// GetStackTrace extracts the stack trace from an error
+// GetStackTrace extracts the stack trace from an error. It only requires
+// StackTracer, not the full ErrorWithCode.
 func GetStackTrace(err error) []string {
-	var ewc ErrorWithCode
-	if errors.As(err, &ewc) {
-		return ewc.StackTrace()
+	var st StackTracer
+	if errors.As(err, &st) {
+		return st.StackTrace()
 	}
 	return nil
 }
