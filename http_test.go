@@ -180,6 +180,62 @@ func TestWriteHTTPError(t *testing.T) {
 		}
 	})
 
+	t.Run("external API error includes service details", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		retryAfter := 30
+		err := NewExternalAPIError("yahoo", "yahoo API call failed", 503, "https://fantasysports.yahooapis.com/...")
+		err.RetryAfter = &retryAfter
+
+		WriteHTTPError(w, err, logger)
+
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+		}
+
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+		}
+		if resp.Error.Details["service"] != "yahoo" {
+			t.Errorf("Details[service] = %v, want yahoo", resp.Error.Details["service"])
+		}
+		if resp.Error.Details["status_code"] != float64(503) {
+			t.Errorf("Details[status_code] = %v, want 503", resp.Error.Details["status_code"])
+		}
+		if resp.Error.Details["retry_after"] != float64(30) {
+			t.Errorf("Details[retry_after] = %v, want 30", resp.Error.Details["retry_after"])
+		}
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		if logger.calls[0].fields["service"] != "yahoo" {
+			t.Errorf("logged service field = %v, want yahoo", logger.calls[0].fields["service"])
+		}
+		if logger.calls[0].fields["service_status"] != 503 {
+			t.Errorf("logged service_status field = %v, want 503", logger.calls[0].fields["service_status"])
+		}
+	})
+
+	t.Run("authentication error logs the auth reason", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewAuthenticationError("token_expired", "session expired")
+
+		WriteHTTPError(w, err, logger)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		if logger.calls[0].fields["auth_reason"] != "token_expired" {
+			t.Errorf("logged auth_reason field = %v, want token_expired", logger.calls[0].fields["auth_reason"])
+		}
+	})
+
 	t.Run("rate limit error sets Retry-After header", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}
