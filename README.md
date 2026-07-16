@@ -236,9 +236,11 @@ import "github.com/n-ae/svcerr/zerologadapter"
 svcerr.WriteHTTPError(w, err, zerologadapter.New(logger))
 ```
 
-`zerologadapter` is optional and lives in this same module - it's the one
-depending on zerolog, not the core `svcerr` package. Importing it is what
-pulls zerolog into your build; if you don't, you don't get it.
+`zerologadapter` is a separate Go module (its own `go.mod`, nested in this
+repo at [`zerologadapter/`](zerologadapter)) - it's the one depending on
+zerolog, not the core `svcerr` module. `go get github.com/n-ae/svcerr`
+never pulls in zerolog; only `go get github.com/n-ae/svcerr/zerologadapter`
+does, and only for callers who use it.
 
 For any other logger, implement the one-method `Logger` interface directly.
 A `nil` `Logger` is also fine - `WriteHTTPError`/`WriteHTTPErrorHTML`/

@@ -16,13 +16,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      # zerologadapter is a separate, nested Go module (its own go.mod) so
+      # that the root module stays dependency-free for callers who never
+      # import it - that also means it's invisible to the root's `./...`
+      # and needs its own checkout of this same pipeline.
+      matrix:
+        module: [., zerologadapter]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           # Single source of truth for the Go version - stays in sync with
-          # go.mod automatically, no separate version to bump here.
-          go-version-file: go.mod
+          # each module's own go.mod automatically, no separate version to
+          # bump here.
+          go-version-file: ${{ matrix.module }}/go.mod
           # Caches the module and build cache keyed on go.sum (default on,
           # kept explicit since it's the main lever on run duration here).
           cache: true
@@ -41,4 +52,5 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+          working-directory: ${{ matrix.module }}
       - run: go test ./...
