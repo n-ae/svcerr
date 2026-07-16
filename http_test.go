@@ -1340,4 +1340,58 @@ func TestRecoveryMiddleware(t *testing.T) {
 			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
 		}
 	})
+
+	t.Run("checked Hijacker assertion correctly reports unsupported on a non-hijacking writer", func(t *testing.T) {
+		logger := &recordingLogger{}
+		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+		hijacked := false
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if hj, ok := w.(http.Hijacker); ok {
+				hijacked = true
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if hijacked {
+			t.Error("handler's w.(http.Hijacker) assertion succeeded, want it to fail - the underlying writer doesn't support Hijacker")
+		}
+		if underlying.rec.Code != http.StatusNoContent {
+			t.Errorf("status = %d, want %d", underlying.rec.Code, http.StatusNoContent)
+		}
+		if len(logger.calls) != 0 {
+			t.Errorf("logger.calls = %d, want 0 (no panic occurred)", len(logger.calls))
+		}
+	})
+
+	t.Run("a handler's own unchecked Hijacker assertion panic is still recovered normally", func(t *testing.T) {
+		logger := &recordingLogger{}
+		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A careless handler that skips the ok check now gets a
+			// runtime type-assertion panic here, since the underlying
+			// writer doesn't support http.Hijacker and the wrapper
+			// correctly doesn't either - rather than the old behavior of
+			// returning a synthetic "does not implement http.Hijacker"
+			// error from Hijack() itself. RecoveryMiddleware must still
+			// recover this like any other panic.
+			_, _, _ = w.(http.Hijacker).Hijack()
+		}))
+
+		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if underlying.rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", underlying.rec.Code, http.StatusInternalServerError)
+		}
+		var resp HTTPErrorResponse
+		if err := json.Unmarshal(underlying.rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", err, underlying.rec.Body.String())
+		}
+		if resp.Error.Code != ErrCodeInternal {
+			t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+		}
+	})
 }
