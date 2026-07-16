@@ -604,7 +604,16 @@ func safeLog(logger Logger, level Level, err error, fields map[string]interface{
 
 // trackingResponseWriter records whether a response has already been
 // committed (a header or body written), so RecoveryMiddleware can tell
-// whether it's still safe to write an error response after a panic.
+// whether it's still safe to write an error response after a panic. It
+// implements only http.ResponseWriter itself - Flush and Hijack are added
+// by the separate wrapper types below (flushTracker, hijackTracker,
+// flushHijackTracker), chosen by newTrackingResponseWriter to match
+// exactly what the underlying writer supports. A single type that always
+// implemented both regardless of what's underneath would misrepresent the
+// underlying writer's real capabilities to a handler's own
+// w.(http.Flusher)/w.(http.Hijacker) assertions, and to
+// http.ResponseController, which would see a false "supported" instead of
+// discovering the truth by unwrapping.
 type trackingResponseWriter struct {
 	http.ResponseWriter
 	wroteHeader bool
@@ -641,33 +650,6 @@ func (w *trackingResponseWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Flush implements http.Flusher by delegating to the wrapped
-// ResponseWriter when it supports flushing (e.g. for SSE handlers), and is
-// a no-op otherwise - http.Flusher's signature has no way to report "not
-// supported". A successful flush commits the response (implicitly as 200
-// OK if no status was written yet) the same way Write does, so it's
-// recorded the same way - otherwise RecoveryMiddleware could still believe
-// the response is uncommitted after a flush and write a second,
-// corrupting body on top of it if the handler subsequently panics. The
-// commit is only recorded when the underlying writer actually supports
-// Flusher: this wrapper structurally implements http.Flusher regardless
-// (Go's http.Flusher has no way to report "unsupported" from a type
-// assertion), so treating every call as a real flush would let a handler
-// on a non-flushing underlying writer mark the response committed while
-// nothing was ever actually written - silently swallowing a later panic's
-// error response instead of just failing to flush early.
-func (w *trackingResponseWriter) Flush() {
-	f, ok := w.ResponseWriter.(http.Flusher)
-	if !ok {
-		return
-	}
-	if !w.wroteHeader {
-		w.wroteHeader = true
-		w.status = http.StatusOK
-	}
-	f.Flush()
-}
-
 // Unwrap exposes the wrapped ResponseWriter to http.ResponseController,
 // which looks for this method (or the original ResponseWriter itself) to
 // reach capabilities like SetReadDeadline/SetWriteDeadline through a
@@ -676,28 +658,101 @@ func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-// Hijack implements http.Hijacker by delegating to the wrapped
-// ResponseWriter when it supports hijacking (e.g. for a WebSocket
-// upgrade). A successful hijack hands the raw connection to the caller, so
-// it's treated as committing the response - RecoveryMiddleware must never
-// attempt to write a JSON error body onto a hijacked connection.
-func (w *trackingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hj, ok := w.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("svcerr: underlying http.ResponseWriter does not implement http.Hijacker")
+// commitOnFlush marks tw committed (implicitly as 200 OK, the same as
+// Write) before delegating to f.Flush - shared by flushTracker and
+// flushHijackTracker, the only two variants that ever call it (both are
+// only constructed when the underlying writer actually supports
+// http.Flusher). A successful flush commits the response the same way
+// Write does, so it's recorded the same way - otherwise RecoveryMiddleware
+// could still believe the response is uncommitted after a flush and write
+// a second, corrupting body on top of it if the handler subsequently
+// panics.
+func commitOnFlush(tw *trackingResponseWriter, f http.Flusher) {
+	if !tw.wroteHeader {
+		tw.wroteHeader = true
+		tw.status = http.StatusOK
 	}
+	f.Flush()
+}
+
+// commitOnHijack hijacks through hj, marking tw committed on success -
+// shared by hijackTracker and flushHijackTracker, the only two variants
+// that ever call it (both are only constructed when the underlying writer
+// actually supports http.Hijacker). A successful hijack hands the raw
+// connection to the caller, so it's treated as committing the response -
+// RecoveryMiddleware must never attempt to write a JSON error body onto a
+// hijacked connection.
+func commitOnHijack(tw *trackingResponseWriter, hj http.Hijacker) (net.Conn, *bufio.ReadWriter, error) {
 	conn, rw, err := hj.Hijack()
 	if err == nil {
-		w.wroteHeader = true
+		tw.wroteHeader = true
 	}
 	return conn, rw, err
+}
+
+// flushTracker adds http.Flusher to trackingResponseWriter, for an
+// underlying writer that supports flushing but not hijacking.
+type flushTracker struct {
+	*trackingResponseWriter
+	flusher http.Flusher
+}
+
+func (w *flushTracker) Flush() { commitOnFlush(w.trackingResponseWriter, w.flusher) }
+
+// hijackTracker adds http.Hijacker to trackingResponseWriter, for an
+// underlying writer that supports hijacking but not flushing.
+type hijackTracker struct {
+	*trackingResponseWriter
+	hijacker http.Hijacker
+}
+
+func (w *hijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return commitOnHijack(w.trackingResponseWriter, w.hijacker)
+}
+
+// flushHijackTracker adds both http.Flusher and http.Hijacker to
+// trackingResponseWriter, for an underlying writer that supports both -
+// the common case for the stdlib HTTP/1.1 server's own ResponseWriter.
+type flushHijackTracker struct {
+	*trackingResponseWriter
+	flusher  http.Flusher
+	hijacker http.Hijacker
+}
+
+func (w *flushHijackTracker) Flush() { commitOnFlush(w.trackingResponseWriter, w.flusher) }
+
+func (w *flushHijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return commitOnHijack(w.trackingResponseWriter, w.hijacker)
+}
+
+// newTrackingResponseWriter wraps w for RecoveryMiddleware's commit
+// tracking. It returns the http.ResponseWriter to pass to the handler -
+// implementing http.Flusher and/or http.Hijacker if and only if w itself
+// does - and the *trackingResponseWriter base to read wroteHeader/status
+// from afterward regardless of which variant was returned (every variant
+// embeds it by pointer, so its state is shared either way).
+func newTrackingResponseWriter(w http.ResponseWriter) (http.ResponseWriter, *trackingResponseWriter) {
+	base := &trackingResponseWriter{ResponseWriter: w}
+	flusher, flushable := w.(http.Flusher)
+	hijacker, hijackable := w.(http.Hijacker)
+
+	switch {
+	case flushable && hijackable:
+		return &flushHijackTracker{trackingResponseWriter: base, flusher: flusher, hijacker: hijacker}, base
+	case flushable:
+		return &flushTracker{trackingResponseWriter: base, flusher: flusher}, base
+	case hijackable:
+		return &hijackTracker{trackingResponseWriter: base, hijacker: hijacker}, base
+	default:
+		return base, base
+	}
 }
 
 // Middleware for error recovery and logging
 func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tw := &trackingResponseWriter{ResponseWriter: w}
+			wrapped, tw := newTrackingResponseWriter(w)
 
 			defer func() {
 				rec := recover()
@@ -747,7 +802,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler")
 			}()
 
-			next.ServeHTTP(tw, r)
+			next.ServeHTTP(wrapped, r)
 		})
 	}
 }

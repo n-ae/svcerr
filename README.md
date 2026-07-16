@@ -125,9 +125,13 @@ router.Use(svcerr.RecoveryMiddleware(h.logger))
 `RecoveryMiddleware` tracks whether the handler already wrote a response
 before panicking, and won't write an error body over one that's already
 committed - it just logs in that case. It also passes through
-`http.Flusher` and `http.Hijacker`, so SSE handlers and WebSocket upgrades
-still work for handlers wrapped by the middleware; a successful hijack is
-itself treated as committing the response.
+`http.Flusher` and `http.Hijacker` when (and only when) the underlying
+`ResponseWriter` supports them, so SSE handlers and WebSocket upgrades
+still work for handlers wrapped by the middleware, and a handler's own
+`w.(http.Flusher)`/`w.(http.Hijacker)` checks (or an
+`http.ResponseController`) get a truthful answer instead of the wrapper
+always claiming both regardless of what's underneath. A successful hijack
+is itself treated as committing the response.
 
 ### Error types
 

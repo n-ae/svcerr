@@ -808,11 +808,11 @@ func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 func TestTrackingResponseWriterFlush(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tw := &trackingResponseWriter{ResponseWriter: rec}
+	wrapped, tw := newTrackingResponseWriter(rec)
 
-	f, ok := (http.ResponseWriter)(tw).(http.Flusher)
+	f, ok := wrapped.(http.Flusher)
 	if !ok {
-		t.Fatal("trackingResponseWriter should implement http.Flusher")
+		t.Fatal("wrapped should implement http.Flusher (the underlying recorder does)")
 	}
 	f.Flush()
 
@@ -828,8 +828,8 @@ func TestTrackingResponseWriterFlush(t *testing.T) {
 }
 
 // nonFlushingWriter implements only http.ResponseWriter - deliberately not
-// http.Flusher - to verify trackingResponseWriter.Flush() doesn't mark the
-// response committed when the underlying writer can't actually flush.
+// http.Flusher or http.Hijacker - to verify newTrackingResponseWriter
+// doesn't advertise capabilities the underlying writer doesn't have.
 type nonFlushingWriter struct {
 	rec *httptest.ResponseRecorder
 }
@@ -838,22 +838,106 @@ func (w *nonFlushingWriter) Header() http.Header         { return w.rec.Header()
 func (w *nonFlushingWriter) Write(b []byte) (int, error) { return w.rec.Write(b) }
 func (w *nonFlushingWriter) WriteHeader(statusCode int)  { w.rec.WriteHeader(statusCode) }
 
-func TestTrackingResponseWriterFlushOnUnsupportedUnderlyingWriter(t *testing.T) {
+// hijackOnlyWriter implements http.ResponseWriter and http.Hijacker but
+// deliberately not http.Flusher, to exercise
+// newTrackingResponseWriter's hijack-only dispatch path.
+type hijackOnlyWriter struct {
+	*nonFlushingWriter
+	hijacked bool
+}
+
+func (w *hijackOnlyWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	server, _ := net.Pipe()
+	return server, bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)), nil
+}
+
+func TestNewTrackingResponseWriterPreservesCapabilities(t *testing.T) {
+	t.Run("neither Flusher nor Hijacker", func(t *testing.T) {
+		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+		wrapped, _ := newTrackingResponseWriter(underlying)
+
+		if _, ok := wrapped.(http.Flusher); ok {
+			t.Error("wrapped implements http.Flusher, want it not to - the underlying writer doesn't")
+		}
+		if _, ok := wrapped.(http.Hijacker); ok {
+			t.Error("wrapped implements http.Hijacker, want it not to - the underlying writer doesn't")
+		}
+	})
+
+	t.Run("Flusher only", func(t *testing.T) {
+		underlying := httptest.NewRecorder()
+		wrapped, _ := newTrackingResponseWriter(underlying)
+
+		if _, ok := wrapped.(http.Flusher); !ok {
+			t.Error("wrapped does not implement http.Flusher, want it to - the underlying writer does")
+		}
+		if _, ok := wrapped.(http.Hijacker); ok {
+			t.Error("wrapped implements http.Hijacker, want it not to - the underlying writer doesn't")
+		}
+	})
+
+	t.Run("Hijacker only", func(t *testing.T) {
+		underlying := &hijackOnlyWriter{nonFlushingWriter: &nonFlushingWriter{rec: httptest.NewRecorder()}}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		if _, ok := wrapped.(http.Flusher); ok {
+			t.Error("wrapped implements http.Flusher, want it not to - the underlying writer doesn't")
+		}
+		hj, ok := wrapped.(http.Hijacker)
+		if !ok {
+			t.Fatal("wrapped does not implement http.Hijacker, want it to - the underlying writer does")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		if !underlying.hijacked {
+			t.Error("Hijack() did not delegate to the underlying writer")
+		}
+		if !tw.wroteHeader {
+			t.Error("a successful Hijack() should mark the response committed")
+		}
+	})
+
+	t.Run("both Flusher and Hijacker", func(t *testing.T) {
+		underlying := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		f, ok := wrapped.(http.Flusher)
+		if !ok {
+			t.Fatal("wrapped does not implement http.Flusher, want it to - the underlying writer does")
+		}
+		if _, ok := wrapped.(http.Hijacker); !ok {
+			t.Error("wrapped does not implement http.Hijacker, want it to - the underlying writer does")
+		}
+		f.Flush()
+		if !underlying.Flushed {
+			t.Error("Flush() did not delegate to the underlying writer")
+		}
+		if !tw.wroteHeader {
+			t.Error("Flush() should mark the response committed")
+		}
+	})
+}
+
+func TestResponseControllerReportsUnsupportedCapabilitiesCorrectly(t *testing.T) {
+	// http.ResponseController is documented to return an error when the
+	// underlying writer doesn't support the requested operation - which
+	// only works if this package's wrapper doesn't itself falsely claim
+	// the capability (it would otherwise intercept the call before
+	// ResponseController's Unwrap traversal ever reaches the real
+	// underlying writer).
 	underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
-	tw := &trackingResponseWriter{ResponseWriter: underlying}
+	wrapped, _ := newTrackingResponseWriter(underlying)
+	controller := http.NewResponseController(wrapped)
 
-	// The wrapper structurally implements Flusher regardless - Go's
-	// http.Flusher has no way to express "unsupported" via a type
-	// assertion - so the property under test is that Flush() must not
-	// mark the response committed when nothing was actually flushed.
-	f, ok := (http.ResponseWriter)(tw).(http.Flusher)
-	if !ok {
-		t.Fatal("trackingResponseWriter should structurally implement http.Flusher regardless")
+	if err := controller.Flush(); err == nil {
+		t.Error("ResponseController.Flush() error = nil, want an error since the underlying writer doesn't support http.Flusher")
 	}
-	f.Flush()
-
-	if tw.wroteHeader {
-		t.Error("Flush() marked the response committed even though the underlying writer doesn't support http.Flusher - nothing was actually written, so RecoveryMiddleware would wrongly skip writing the real error response after a later panic")
+	if _, _, err := controller.Hijack(); err == nil {
+		t.Error("ResponseController.Hijack() error = nil, want an error since the underlying writer doesn't support http.Hijacker")
 	}
 }
 
@@ -913,22 +997,21 @@ func TestTrackingResponseWriterUnwrap(t *testing.T) {
 func TestTrackingResponseWriterHijack(t *testing.T) {
 	t.Run("underlying writer does not support hijacking", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		tw := &trackingResponseWriter{ResponseWriter: rec}
+		wrapped, _ := newTrackingResponseWriter(rec)
 
-		hj, ok := (http.ResponseWriter)(tw).(http.Hijacker)
-		if !ok {
-			t.Fatal("trackingResponseWriter should structurally implement http.Hijacker")
-		}
-		if _, _, err := hj.Hijack(); err == nil {
-			t.Error("Hijack() error = nil, want an error since the underlying writer doesn't support hijacking")
+		if _, ok := wrapped.(http.Hijacker); ok {
+			t.Fatal("wrapped implements http.Hijacker, want it not to - httptest.ResponseRecorder doesn't support hijacking")
 		}
 	})
 
 	t.Run("successful hijack delegates and marks the response committed", func(t *testing.T) {
 		underlying := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
-		tw := &trackingResponseWriter{ResponseWriter: underlying}
+		wrapped, tw := newTrackingResponseWriter(underlying)
 
-		hj := (http.ResponseWriter)(tw).(http.Hijacker)
+		hj, ok := wrapped.(http.Hijacker)
+		if !ok {
+			t.Fatal("wrapped should implement http.Hijacker (the underlying recorder does)")
+		}
 		conn, _, err := hj.Hijack()
 		if err != nil {
 			t.Fatalf("Hijack() error = %v", err)
@@ -1150,21 +1233,48 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 	})
 
-	t.Run("panic after Flush on a non-flushing writer still gets the error response", func(t *testing.T) {
+	t.Run("checked Flusher assertion correctly reports unsupported on a non-flushing writer", func(t *testing.T) {
+		logger := &recordingLogger{}
+		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+		flushed := false
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if f, ok := w.(http.Flusher); ok {
+				flushed = true
+				f.Flush()
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if flushed {
+			t.Error("handler's w.(http.Flusher) assertion succeeded, want it to fail - the underlying writer doesn't support Flusher")
+		}
+		if underlying.rec.Code != http.StatusNoContent {
+			t.Errorf("status = %d, want %d", underlying.rec.Code, http.StatusNoContent)
+		}
+		if len(logger.calls) != 0 {
+			t.Errorf("logger.calls = %d, want 0 (no panic occurred)", len(logger.calls))
+		}
+	})
+
+	t.Run("a handler's own unchecked Flusher assertion panic is still recovered normally", func(t *testing.T) {
 		logger := &recordingLogger{}
 		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
 		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// The tracking wrapper structurally implements http.Flusher
-			// regardless of what the underlying writer supports, so this
-			// assertion succeeds - but nothing is actually flushed.
+			// A careless handler that skips the ok check now gets a
+			// runtime type-assertion panic here, since the underlying
+			// writer doesn't support http.Flusher and the wrapper
+			// correctly doesn't either - rather than the old behavior of
+			// silently no-op'ing. RecoveryMiddleware must still recover
+			// this like any other panic.
 			w.(http.Flusher).Flush()
-			panic("boom after a no-op flush")
 		}))
 
 		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if underlying.rec.Code != http.StatusInternalServerError {
-			t.Errorf("status = %d, want %d (a no-op Flush on a non-flushing writer must not be treated as committing the response)", underlying.rec.Code, http.StatusInternalServerError)
+			t.Errorf("status = %d, want %d", underlying.rec.Code, http.StatusInternalServerError)
 		}
 		var resp HTTPErrorResponse
 		if err := json.Unmarshal(underlying.rec.Body.Bytes(), &resp); err != nil {
