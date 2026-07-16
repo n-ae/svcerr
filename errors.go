@@ -197,6 +197,32 @@ func RecaptureStackTrace(err error, extraSkip int) {
 	setter.setStackTrace(captureStackTrace(2 + extraSkip))
 }
 
+// New creates a generic error with the given code and message. Prefer the
+// semantic constructors below (NewValidationError, NewNotFoundError, ...)
+// when one exists for what you're representing; use New directly for codes
+// that have no dedicated constructor, e.g. ErrCodeMissingRequired,
+// ErrCodeDatabaseConnection, ErrCodeDatabaseTransaction,
+// ErrCodeDatabaseMigration, ErrCodeResourceConflict, or ErrCodeQuotaExceeded.
+func New(code ErrorCode, message string) *BaseError {
+	return &BaseError{
+		code:       code,
+		message:    message,
+		stackTrace: captureStackTrace(2),
+	}
+}
+
+// Wrap wraps err as a generic error with the given code and message. As
+// with the semantic Wrap* constructors, err's text is never shown to
+// clients unless SetPublicMessage is called explicitly.
+func Wrap(err error, code ErrorCode, message string) *BaseError {
+	return &BaseError{
+		code:       code,
+		message:    message,
+		cause:      err,
+		stackTrace: captureStackTrace(2),
+	}
+}
+
 // ValidationError represents input validation errors
 type ValidationError struct {
 	BaseError

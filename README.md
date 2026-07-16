@@ -84,13 +84,24 @@ has a `New*`/`Wrap*` constructor, carries an `ErrorCode`, and supports
 doc comment in [`errors.go`](errors.go) for the full list of codes and their
 HTTP status mapping.
 
+For a code with no dedicated constructor (e.g. `ErrCodeDatabaseConnection`,
+`ErrCodeMissingRequired`, `ErrCodeResourceConflict`, `ErrCodeQuotaExceeded`),
+use the generic `New`/`Wrap`:
+
+```go
+err := errors.New(errors.ErrCodeDatabaseConnection, "could not reach the database")
+err := errors.Wrap(dbErr, errors.ErrCodeDatabaseConnection, "could not reach the database")
+```
+
 ### Public vs. internal messages
 
-By default the client-facing message is either the error's own `Error()`
-text or a generic per-code default — usually fine, but sometimes `Error()`
-carries detail (a raw query, an internal hostname) you'd log but not want to
-send back to a client. `SetPublicMessage` overrides just the client-facing
-side for that one error instance; the logged error is untouched:
+By default the client-facing message is the error's own `Error()` text -
+but only when the error has no wrapped cause. An error built by a `Wrap*`
+constructor (or `Wrap`) falls back to a generic per-code message instead,
+since its `Error()` text embeds the wrapped cause and may carry detail (a
+raw query, an internal hostname, third-party error text) you'd log but
+never want in a response. `SetPublicMessage` overrides the client-facing
+text explicitly, for either case:
 
 ```go
 err := errors.WrapDatabaseError(dbErr, "query", "SELECT * FROM leagues...")

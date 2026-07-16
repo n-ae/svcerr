@@ -333,6 +333,50 @@ func TestWrapInternalError(t *testing.T) {
 	}
 }
 
+func TestNew(t *testing.T) {
+	// New reaches codes with no dedicated constructor, e.g.
+	// ErrCodeDatabaseConnection.
+	err := New(ErrCodeDatabaseConnection, "could not reach the database")
+
+	if err.Code() != ErrCodeDatabaseConnection {
+		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeDatabaseConnection)
+	}
+	if err.Error() != "could not reach the database" {
+		t.Errorf("Error() = %q, want %q", err.Error(), "could not reach the database")
+	}
+	if err.Unwrap() != nil {
+		t.Errorf("Unwrap() = %v, want nil", err.Unwrap())
+	}
+	if len(err.StackTrace()) == 0 {
+		t.Error("StackTrace() is empty")
+	}
+
+	// New has no cause, so its message is safe to surface directly - same
+	// rule as the semantic New* constructors.
+	if got := UserMessage(err); got != "could not reach the database" {
+		t.Errorf("UserMessage() = %q, want the error's own message", got)
+	}
+}
+
+func TestWrap(t *testing.T) {
+	originalErr := errors.New("password=hunter2 host=10.0.0.1")
+	err := Wrap(originalErr, ErrCodeDatabaseTransaction, "transaction failed")
+
+	if err.Code() != ErrCodeDatabaseTransaction {
+		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeDatabaseTransaction)
+	}
+	if !errors.Is(err, originalErr) {
+		t.Error("errors.Is() failed to find the wrapped error")
+	}
+
+	// Wrap has a cause, so - same rule as the semantic Wrap* constructors -
+	// its own Error() text (which embeds the cause) must not be surfaced to
+	// clients by default.
+	if got := UserMessage(err); got == err.Error() || strings.Contains(got, "hunter2") {
+		t.Errorf("UserMessage() = %q, leaked the wrapped cause", got)
+	}
+}
+
 func TestErrorTypeChecking(t *testing.T) {
 	tests := []struct {
 		name       string

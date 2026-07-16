@@ -47,13 +47,22 @@ func HTTPStatusCode(code ErrorCode) int {
 	case ErrCodeExternalAPI:
 		return http.StatusBadGateway
 
-	// Database errors -> 503 Service Unavailable
-	case ErrCodeDatabaseConnection, ErrCodeDatabaseQuery, ErrCodeDatabaseTransaction, ErrCodeDatabaseMigration:
+	// An unreachable database is a transient condition -> 503 Service
+	// Unavailable. A malformed query or a failed transaction/migration is
+	// a bug or invariant failure on this end, not something a client
+	// retry fixes -> 500, same as any other internal error.
+	case ErrCodeDatabaseConnection:
 		return http.StatusServiceUnavailable
+	case ErrCodeDatabaseQuery, ErrCodeDatabaseTransaction, ErrCodeDatabaseMigration:
+		return http.StatusInternalServerError
 
 	// Internal errors -> 500 Internal Server Error
-	case ErrCodeInternal, ErrCodeNotImplemented:
+	case ErrCodeInternal:
 		return http.StatusInternalServerError
+
+	// Not implemented -> 501 Not Implemented
+	case ErrCodeNotImplemented:
+		return http.StatusNotImplemented
 
 	default:
 		return http.StatusInternalServerError
@@ -161,7 +170,7 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 
 	// Default messages by code
 	switch code {
-	case ErrCodeInvalidInput:
+	case ErrCodeInvalidInput, ErrCodeInvalidFormat, ErrCodeConstraintViolation:
 		return "Invalid input provided. Please check your request and try again."
 	case ErrCodeMissingRequired:
 		return "Required field is missing."
@@ -177,14 +186,20 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 		return "The requested resource was not found."
 	case ErrCodeAlreadyExists:
 		return "A resource with this identifier already exists."
+	case ErrCodeResourceConflict:
+		return "The request conflicts with the current state of the resource."
 	case ErrCodeRateLimitExceeded:
 		return "Too many requests. Please try again later."
+	case ErrCodeQuotaExceeded:
+		return "You have exceeded your allotted quota."
 	case ErrCodeExternalAPI:
 		return "External service is temporarily unavailable. Please try again later."
-	case ErrCodeDatabaseConnection, ErrCodeDatabaseQuery:
+	case ErrCodeDatabaseConnection, ErrCodeDatabaseQuery, ErrCodeDatabaseTransaction, ErrCodeDatabaseMigration:
 		return "Database error occurred. Please try again."
 	case ErrCodeInternal:
 		return "An internal error occurred. Please contact support if the problem persists."
+	case ErrCodeNotImplemented:
+		return "This functionality is not yet implemented."
 	default:
 		return "An unexpected error occurred."
 	}

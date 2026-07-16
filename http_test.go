@@ -29,11 +29,11 @@ func TestHTTPStatusCode(t *testing.T) {
 		{ErrCodeQuotaExceeded, http.StatusTooManyRequests},
 		{ErrCodeExternalAPI, http.StatusBadGateway},
 		{ErrCodeDatabaseConnection, http.StatusServiceUnavailable},
-		{ErrCodeDatabaseQuery, http.StatusServiceUnavailable},
-		{ErrCodeDatabaseTransaction, http.StatusServiceUnavailable},
-		{ErrCodeDatabaseMigration, http.StatusServiceUnavailable},
+		{ErrCodeDatabaseQuery, http.StatusInternalServerError},
+		{ErrCodeDatabaseTransaction, http.StatusInternalServerError},
+		{ErrCodeDatabaseMigration, http.StatusInternalServerError},
 		{ErrCodeInternal, http.StatusInternalServerError},
-		{ErrCodeNotImplemented, http.StatusInternalServerError},
+		{ErrCodeNotImplemented, http.StatusNotImplemented},
 		{ErrorCode("SOMETHING_UNKNOWN"), http.StatusInternalServerError},
 	}
 
@@ -44,6 +44,44 @@ func TestHTTPStatusCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWriteHTTPErrorWithGenericConstructor(t *testing.T) {
+	t.Run("New reaches a previously unreachable code", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := New(ErrCodeDatabaseConnection, "could not reach the database")
+
+		WriteHTTPError(w, err, logger)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+		}
+
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if resp.Error.Code != ErrCodeDatabaseConnection {
+			t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeDatabaseConnection)
+		}
+	})
+
+	t.Run("Wrap does not leak the wrapped cause", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		secret := errors.New("password=hunter2 host=10.0.0.1")
+		err := Wrap(secret, ErrCodeDatabaseMigration, "migration failed")
+
+		WriteHTTPError(w, err, logger)
+
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+		if strings.Contains(w.Body.String(), "hunter2") {
+			t.Errorf("response body leaked wrapped cause: %s", w.Body.String())
+		}
+	})
 }
 
 // recordingLogger captures every Log call for assertions.
