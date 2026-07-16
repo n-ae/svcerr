@@ -12,3 +12,4 @@ them there; new assessments are created here with the next number.
 | 0003 | v0.4.1 | [../assessment-maintainable-architect-v4-v0.4.1.md](../assessment-maintainable-architect-v4-v0.4.1.md) |
 | 0004 | v0.5.0 | [../assessment-maintainable-architect-v4-v0.5.0.md](../assessment-maintainable-architect-v4-v0.5.0.md) |
 | 0005 | v0.6.0 | [0005-svcerr-v0.6.0-review.md](0005-svcerr-v0.6.0-review.md) |
+| 0006 | v0.6.1 | [0006-svcerr-v0.6.1-review.md](0006-svcerr-v0.6.1-review.md) |
