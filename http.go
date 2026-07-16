@@ -107,8 +107,8 @@ func HTTPStatusCode(code ErrorCode) int {
 
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr := writeJSONErrorBody(w, err)
-	logError(logger, err, statusCode, renderErr)
+	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err)
+	logError(logger, err, statusCode, renderErr, writeErr)
 }
 
 // WriteJSON writes err's standardized JSON error response to w and returns
@@ -118,19 +118,19 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 // instead of participating in this package's Logger contract just to
 // render a response.
 func WriteJSON(w http.ResponseWriter, err error) int {
-	statusCode, _ := writeJSONErrorBody(w, err)
+	statusCode, _, _ := writeJSONErrorBody(w, err)
 	return statusCode
 }
 
 // writeJSONErrorBody writes err's JSON body and headers to w and returns
 // the status code used, without logging, plus the marshal error when the
 // real body couldn't be encoded and a generic fallback was substituted
-// instead (nil otherwise) - the caller decides what to do with that (log
-// it, in WriteHTTPError's case). Split out of WriteHTTPError so
-// RecoveryMiddleware can write the response and log the panic as a single
-// record instead of the response write and the log call each logging
-// independently.
-func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, renderErr error) {
+// instead (nil otherwise), and any error from the final w.Write (nil on a
+// full write) - the caller decides what to do with either (log them, in
+// WriteHTTPError's case). Split out of WriteHTTPError so RecoveryMiddleware
+// can write the response and log the panic as a single record instead of
+// the response write and the log call each logging independently.
+func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -157,23 +157,18 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 
 	prepareErrorHeaders(w.Header(), "application/json")
 
-	// Add Retry-After header for rate limit errors - keyed off the same
-	// outermost-coded node as extractErrorDetails, so an outer wrapper's
-	// code can't inherit a wrapped RateLimitError's header. Skipped on the
-	// marshal-failure fallback: that response no longer represents err's
-	// own classification.
+	// Skipped on the marshal-failure fallback: that response no longer
+	// represents err's own classification.
 	if marshalErr == nil {
-		if rle, ok := node.(*RateLimitError); ok {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
-		}
+		rateLimitRetryAfterHeader(w.Header(), node)
 	}
 
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
+	_, writeErr = w.Write(body)
 
-	return statusCode, renderErr
+	return statusCode, renderErr, writeErr
 }
 
 // prepareErrorHeaders resets the response headers this package's writers
@@ -193,6 +188,16 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 // written) would otherwise leave clients trying to gzip-decode a body
 // that was never actually compressed.
 //
+// Retry-After and WWW-Authenticate are deleted for the same reason as
+// Content-Length: both describe the specific response this call is
+// replacing, not necessarily this one - a handler (or a previous request
+// through a reused/pooled ResponseWriter-like object) may have set either
+// in anticipation of a response that never got written before this error
+// took over. Every caller of prepareErrorHeaders re-adds Retry-After
+// (rateLimitRetryAfterHeader) or WWW-Authenticate (setAuthenticateChallenge)
+// immediately afterward when err's own classification actually calls for
+// it, so a genuinely-applicable value is never lost.
+//
 // This still deliberately doesn't touch ETag, Last-Modified, or
 // Accept-Ranges - those describe a specific successful representation
 // this response isn't attempting to be, but aren't actively misleading
@@ -201,8 +206,22 @@ func prepareErrorHeaders(h http.Header, contentType string) {
 	h.Del("Content-Length")
 	h.Del("Content-Encoding")
 	h.Del("Trailer")
+	h.Del("Retry-After")
+	h.Del("WWW-Authenticate")
 	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
+}
+
+// rateLimitRetryAfterHeader sets Retry-After when node (the same
+// outermost-coded node used for everything else in err's classification)
+// is a *RateLimitError, so an outer wrapper's code can't inherit a wrapped
+// RateLimitError's header. Shared by the JSON and problem+json writers;
+// skipped on the marshal-failure fallback by its callers, since that
+// response no longer represents err's own classification.
+func rateLimitRetryAfterHeader(h http.Header, node coderError) {
+	if rle, ok := node.(*RateLimitError); ok {
+		h.Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+	}
 }
 
 // setAuthenticateChallenge sets the WWW-Authenticate header when
@@ -241,19 +260,20 @@ func fallbackErrorBody(code ErrorCode) []byte {
 
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
-	statusCode := writeHTMLErrorBody(w, err)
-	logError(logger, err, statusCode, nil)
+	statusCode, writeErr := writeHTMLErrorBody(w, err)
+	logError(logger, err, statusCode, nil, writeErr)
 }
 
 // WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML writes.
 func WriteHTML(w http.ResponseWriter, err error) int {
-	return writeHTMLErrorBody(w, err)
+	statusCode, _ := writeHTMLErrorBody(w, err)
+	return statusCode
 }
 
 // writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
-func writeHTMLErrorBody(w http.ResponseWriter, err error) int {
+func writeHTMLErrorBody(w http.ResponseWriter, err error) (statusCode int, writeErr error) {
 	code := GetErrorCode(err)
-	statusCode := HTTPStatusCode(code)
+	statusCode = HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
 
 	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8")
@@ -265,9 +285,9 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error) int {
 		`<p>` + html.EscapeString(message) + `</p>` +
 		`</div>`
 
-	_, _ = w.Write([]byte(body))
+	_, writeErr = w.Write([]byte(body))
 
-	return statusCode
+	return statusCode, writeErr
 }
 
 // ProblemDetails is the RFC 9457 (https://www.rfc-editor.org/rfc/rfc9457)
@@ -312,18 +332,18 @@ func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 // includes a wrapped cause's text without an explicit SetPublicMessage),
 // and logging behave identically to WriteHTTPError.
 func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr := writeProblemJSONBody(w, err)
-	logError(logger, err, statusCode, renderErr)
+	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err)
+	logError(logger, err, statusCode, renderErr, writeErr)
 }
 
 // WriteProblem mirrors WriteJSON for the RFC 9457 rendering WriteHTTPProblem writes.
 func WriteProblem(w http.ResponseWriter, err error) int {
-	statusCode, _ := writeProblemJSONBody(w, err)
+	statusCode, _, _ := writeProblemJSONBody(w, err)
 	return statusCode
 }
 
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
-func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, renderErr error) {
+func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -373,17 +393,15 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, ren
 	prepareErrorHeaders(w.Header(), "application/problem+json")
 
 	if marshalErr == nil {
-		if rle, ok := node.(*RateLimitError); ok {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
-		}
+		rateLimitRetryAfterHeader(w.Header(), node)
 	}
 
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
+	_, writeErr = w.Write(body)
 
-	return statusCode, renderErr
+	return statusCode, renderErr, writeErr
 }
 
 // fallbackProblemBody mirrors fallbackErrorBody for the problem+json body -
@@ -634,12 +652,20 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 // substituted (nil otherwise) - logged as its own field, together with
 // the code the client actually received, so the log doesn't just show
 // err's original classification with no indication the client got a
-// different one.
-func logError(logger Logger, err error, statusCode int, renderErr error) {
+// different one. writeErr is whatever the final w.Write returned (nil on
+// a full write) - unlike renderErr it doesn't imply a different body was
+// sent, only that delivery of the intended one may have failed or been
+// truncated (client disconnect, expired deadline, ...), which is
+// otherwise invisible: WriteHeader/Write don't return to their caller in
+// a way any of this package's writers surface today.
+func logError(logger Logger, err error, statusCode int, renderErr, writeErr error) {
 	level, fields := errorLogFields(err, statusCode)
 	if renderErr != nil {
 		fields["response_render_error"] = renderErr.Error()
 		fields["rendered_error_code"] = string(ErrCodeInternal)
+	}
+	if writeErr != nil {
+		fields["response_write_error"] = writeErr.Error()
 	}
 	safeLog(logger, level, err, fields, "HTTP error response")
 }
@@ -952,12 +978,15 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				// can't produce a marshal failure the way a caller's own
 				// SetPublicDetail could, so unlike WriteHTTPError there's
 				// no render error worth plumbing through here.
-				statusCode, _ := writeJSONErrorBody(tw, err)
+				statusCode, _, writeErr := writeJSONErrorBody(tw, err)
 
 				_, fields := errorLogFields(err, statusCode)
 				fields["panic"] = rec
 				fields["method"] = r.Method
 				fields["path"] = r.URL.Path
+				if writeErr != nil {
+					fields["response_write_error"] = writeErr.Error()
+				}
 				safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler")
 			}()
 

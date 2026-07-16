@@ -196,6 +196,30 @@ func (l *recordingLogger) Log(level Level, err error, fields map[string]interfac
 	l.calls = append(l.calls, loggedCall{level: level, err: err, fields: fields, msg: msg})
 }
 
+// failingWriter is an http.ResponseWriter whose Write always fails, as a
+// real one's would on a client disconnect, an expired write deadline, or
+// any other transport failure - the header map still works normally so
+// this package's header-manipulation code runs unaffected.
+type failingWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *failingWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+func (w *failingWriter) WriteHeader(status int) {
+	w.status = status
+}
+
 func TestWriteHTTPError(t *testing.T) {
 	t.Run("not found error", func(t *testing.T) {
 		w := httptest.NewRecorder()
@@ -378,6 +402,39 @@ func TestWriteHTTPError(t *testing.T) {
 		}
 	})
 
+	t.Run("stale Retry-After/WWW-Authenticate from a previous response don't survive onto an unrelated one", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		w.Header().Set("Retry-After", "999")
+		w.Header().Set("WWW-Authenticate", `Basic realm="old"`)
+		logger := &recordingLogger{}
+
+		WriteHTTPError(w, NewNotFoundError("league", "1"), logger)
+
+		if got := w.Header().Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q, want empty (a 404 doesn't qualify for it, and the value predates this response)", got)
+		}
+		if got := w.Header().Get("WWW-Authenticate"); got != "" {
+			t.Errorf("WWW-Authenticate = %q, want empty (a 404 doesn't qualify for it, and the value predates this response)", got)
+		}
+	})
+
+	t.Run("a failed body write is logged, not silently swallowed", func(t *testing.T) {
+		w := &failingWriter{}
+		logger := &recordingLogger{}
+
+		WriteHTTPError(w, NewNotFoundError("league", "1"), logger)
+
+		if w.status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", w.status, http.StatusNotFound)
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		if _, ok := logger.calls[0].fields["response_write_error"]; !ok {
+			t.Error("expected a response_write_error field - the client never received a body and nothing else says so")
+		}
+	})
+
 	t.Run("internal error logs at error level with stack trace", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}
@@ -447,6 +504,20 @@ func TestWriteHTTPErrorHTML(t *testing.T) {
 
 	if len(logger.calls) != 1 {
 		t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+	}
+}
+
+func TestWriteHTTPErrorHTMLLogsWriteFailure(t *testing.T) {
+	w := &failingWriter{}
+	logger := &recordingLogger{}
+
+	WriteHTTPErrorHTML(w, NewNotFoundError("league", "1"), logger)
+
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+	}
+	if _, ok := logger.calls[0].fields["response_write_error"]; !ok {
+		t.Error("expected a response_write_error field - the client never received a body and nothing else says so")
 	}
 }
 
@@ -562,6 +633,20 @@ func TestWriteHTTPProblem(t *testing.T) {
 
 		if got := w.Header().Get("Retry-After"); got != "60" {
 			t.Errorf("Retry-After = %q, want 60", got)
+		}
+	})
+
+	t.Run("a failed body write is logged, not silently swallowed", func(t *testing.T) {
+		w := &failingWriter{}
+		logger := &recordingLogger{}
+
+		WriteHTTPProblem(w, NewNotFoundError("league", "1"), logger)
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		if _, ok := logger.calls[0].fields["response_write_error"]; !ok {
+			t.Error("expected a response_write_error field - the client never received a body and nothing else says so")
 		}
 	})
 }

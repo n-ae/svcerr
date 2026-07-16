@@ -386,6 +386,17 @@ func TestRateLimitError(t *testing.T) {
 	}
 }
 
+func TestRateLimitErrorClampsNegativeRetryAfter(t *testing.T) {
+	err := NewRateLimitError("yahoo", 300, -1)
+
+	if err.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", err.RetryAfter)
+	}
+	if err.Context()["retry_after"] != 0 {
+		t.Errorf(`Context()["retry_after"] = %v, want 0, to stay consistent with the clamped RetryAfter field`, err.Context()["retry_after"])
+	}
+}
+
 func TestWrapRateLimitError(t *testing.T) {
 	originalErr := errors.New("redis: connection refused")
 	wrappedErr := WrapRateLimitError(originalErr, "yahoo", 300, 60)
@@ -407,6 +418,14 @@ func TestWrapRateLimitError(t *testing.T) {
 	}
 	if got, want := UserMessage(wrappedErr), "rate limit exceeded for yahoo: 300 requests"; got != want {
 		t.Errorf("UserMessage() = %q, want %q", got, want)
+	}
+}
+
+func TestWrapRateLimitErrorClampsNegativeRetryAfter(t *testing.T) {
+	wrappedErr := WrapRateLimitError(errors.New("redis: connection refused"), "yahoo", 300, -5)
+
+	if wrappedErr.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", wrappedErr.RetryAfter)
 	}
 }
 
@@ -1087,7 +1106,7 @@ func TestHTTPHelpersUnwrapWrappedErrors(t *testing.T) {
 	var loggedFields map[string]interface{}
 	logError(loggerFunc(func(_ Level, _ error, fields map[string]interface{}, _ string) {
 		loggedFields = fields
-	}), wrapped, http.StatusBadRequest, nil)
+	}), wrapped, http.StatusBadRequest, nil, nil)
 
 	if loggedFields["field"] != "email" {
 		t.Errorf("logError() fields[\"field\"] = %v, want email", loggedFields["field"])

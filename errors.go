@@ -776,8 +776,23 @@ type RateLimitError struct {
 	RetryAfter int // seconds
 }
 
+// clampRetryAfter floors retryAfter at 0. RFC 9110 §10.2.3 defines
+// Retry-After as a non-negative delay-seconds (or an HTTP-date); a
+// negative value would go straight into the header via
+// fmt.Sprintf("%d", ...) with no downstream validation, so it's clamped
+// here, at construction, rather than left for the HTTP writer to catch -
+// that keeps the stored RetryAfter field and the "retry_after" context
+// entry consistent with what a caller actually sees on the wire.
+func clampRetryAfter(retryAfter int) int {
+	if retryAfter < 0 {
+		return 0
+	}
+	return retryAfter
+}
+
 // NewRateLimitError creates a new rate limit error
 func NewRateLimitError(service string, limit, retryAfter int) *RateLimitError {
+	retryAfter = clampRetryAfter(retryAfter)
 	return &RateLimitError{
 		BaseError: BaseError{
 			code:    ErrCodeRateLimitExceeded,
@@ -800,6 +815,7 @@ func NewRateLimitError(service string, limit, retryAfter int) *RateLimitError {
 // message is generated the same way NewRateLimitError's is, never derived
 // from err's own text.
 func WrapRateLimitError(err error, service string, limit, retryAfter int) *RateLimitError {
+	retryAfter = clampRetryAfter(retryAfter)
 	return &RateLimitError{
 		BaseError: BaseError{
 			code:    ErrCodeRateLimitExceeded,

@@ -144,6 +144,25 @@ deliberate asymmetry: an underlying writer implementing only
 through the wrapper, since the flush capability genuinely exists and
 `http.Flusher` is how handlers conventionally probe for it.
 
+**Not compatible with transparent, eagerly-header-setting compression
+wrappers.** Every writer in this package (`WriteJSON`, `WriteHTML`,
+`WriteProblem`, `WriteHTTPError`/`WriteHTTPErrorHTML`/`WriteHTTPProblem`,
+and `RecoveryMiddleware`) unconditionally deletes any pre-existing
+`Content-Encoding` on the `ResponseWriter` before writing its own
+always-plaintext body - this is what stops a panic replaced mid-gzip-response
+from leaving a stale `Content-Encoding: gzip` on a body that's actually
+plain JSON. The tradeoff: if the `ResponseWriter` you pass in belongs to a
+compression middleware that sets `Content-Encoding` once up front and then
+transparently gzips *everything* written through it (a common pattern,
+including outside `RecoveryMiddleware` - any plain `WriteJSON` call
+reaches the same code), that header gets deleted while the body is
+compressed anyway, and the client receives gzip bytes labeled as plain
+text. There's no way for this package to tell a stale header (left over
+from whatever the handler intended before erroring out) apart from a live
+one a wrapper is about to honor. If you use this kind of compression
+middleware, put it *inside* (called before) any of this package's
+writers, not outside/wrapping them.
+
 ### Error types
 
 `ValidationError`, `DatabaseError`, `ExternalAPIError`, `AuthenticationError`,
