@@ -4,7 +4,8 @@
 
 Typed application errors for Go services: error codes, HTTP status mapping,
 JSON/HTML response writers, panic-recovery middleware, and stack trace
-capture — with no dependency on any specific logging library.
+capture. The core package imports no logging library — see "Logging"
+below.
 
 ```go
 import "github.com/n-ae/svcerr"
@@ -154,6 +155,10 @@ import "github.com/n-ae/svcerr/zerologadapter"
 
 svcerr.WriteHTTPError(w, err, zerologadapter.New(logger))
 ```
+
+`zerologadapter` is optional and lives in this same module - it's the one
+depending on zerolog, not the core `svcerr` package. Importing it is what
+pulls zerolog into your build; if you don't, you don't get it.
 
 For any other logger, implement the one-method `Logger` interface directly.
 

@@ -1,6 +1,7 @@
 // Package zerologadapter adapts a zerolog.Logger to the svcerr.Logger
-// interface, so the parent package stays free of any logging-library
-// dependency while callers can still log through zerolog.
+// interface. It's optional and depends on zerolog - the parent svcerr
+// package does not; importing this subpackage is what pulls zerolog into a
+// caller's build.
 package zerologadapter
 
 import (

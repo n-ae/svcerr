@@ -5,10 +5,12 @@
 //
 // All types implement ErrorWithCode interface and support error wrapping.
 //
-// The package has no dependency on any specific logging library. WriteHTTPError,
-// WriteHTTPErrorHTML, and RecoveryMiddleware log through the Logger interface -
-// pass an adapter for whatever logger the caller uses (see the zerologadapter
-// subpackage for a zerolog adapter).
+// This package's own code imports no logging library: WriteHTTPError,
+// WriteHTTPErrorHTML, and RecoveryMiddleware log through the Logger
+// interface instead - pass an adapter for whatever logger the caller uses.
+// (The zerologadapter subpackage, which does depend on zerolog, is optional
+// and lives in this same module; importing it is what pulls zerolog into a
+// caller's build, not this package.)
 package svcerr
 
 import (
