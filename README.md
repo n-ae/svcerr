@@ -64,7 +64,7 @@ body instead, for clients that expect the standard problem-details shape:
 ```json
 {
   "type": "about:blank",
-  "title": "The requested resource was not found.",
+  "title": "Not Found",
   "status": 404,
   "detail": "league not found: 12345",
   "code": "NOT_FOUND",
@@ -73,8 +73,9 @@ body instead, for clients that expect the standard problem-details shape:
 }
 ```
 
-`title` is the generic, code-level description; `detail` is specific to
-this occurrence (and follows the same public/internal message rules as
+`title` is the HTTP status's standard reason phrase, per RFC 9457 §4.2.1
+(since `type` is `"about:blank"` here); `detail` is specific to this
+occurrence (and follows the same public/internal message rules as
 `WriteHTTPError` - see "Public vs. internal messages" below). Extension
 members (`code`, `resource_type`, `resource_id`, ...) sit at the top level,
 per RFC 9457, rather than nested under a sub-object.
@@ -172,13 +173,22 @@ requirement for participating in the package's functions.
 
 ### Public vs. internal messages
 
-By default the client-facing message is the error's own `Error()` text -
-but only when the error has no wrapped cause. An error built by a `Wrap*`
-constructor (or `Wrap`) falls back to a generic per-code message instead,
-since its `Error()` text embeds the wrapped cause and may carry detail (a
-raw query, an internal hostname, third-party error text) you'd log but
-never want in a response. `SetPublicMessage` overrides the client-facing
-text explicitly, for either case:
+By default, whether the client-facing message is the error's own message
+depends on its **category**, not on whether it wraps a cause:
+
+- **Validation, not-found, conflict, auth, and rate-limit** codes are
+  client-input-shaped - the message you pass to `NewValidationError`,
+  `WrapValidationError`, `NewNotFoundError`, etc. is always an explicit
+  argument you chose, never text derived from a wrapped cause, so it's
+  shown by default even when the error wraps one.
+- **Database, external-API, and internal** codes fall back to a generic
+  per-code message instead, whether or not they wrap a cause - `Error()`
+  text in these categories often carries operational detail (a raw query,
+  an internal hostname, third-party response text, a secret) that must
+  never reach a client without an explicit opt-in.
+
+`SetPublicMessage` overrides the client-facing text explicitly, for either
+category:
 
 ```go
 err := svcerr.WrapDatabaseError(dbErr, "query", "SELECT * FROM leagues...")
@@ -231,6 +241,21 @@ depending on zerolog, not the core `svcerr` package. Importing it is what
 pulls zerolog into your build; if you don't, you don't get it.
 
 For any other logger, implement the one-method `Logger` interface directly.
+A `nil` `Logger` is also fine - `WriteHTTPError`/`WriteHTTPErrorHTML`/
+`WriteHTTPProblem`/`RecoveryMiddleware` simply skip logging rather than
+panicking, so you don't have to plumb through a no-op implementation just
+to render a response without logging it.
+
+If you want response rendering with no `Logger` involvement at all - e.g.
+you're reporting errors through something other than this package's
+`Logger` contract - use `WriteJSON`, `WriteHTML`, or `WriteProblem`
+directly. Each writes the same body as its `WriteHTTP*` counterpart and
+returns the status code used, without touching a logger:
+
+```go
+statusCode := svcerr.WriteJSON(w, err) // no logging, no Logger argument
+myReporter.Report(r.Context(), err, statusCode)
+```
 
 ## Origin
 

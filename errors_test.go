@@ -351,10 +351,12 @@ func TestNew(t *testing.T) {
 		t.Error("StackTrace() is empty")
 	}
 
-	// New has no cause, so its message is safe to surface directly - same
-	// rule as the semantic New* constructors.
-	if got := UserMessage(err); got != "could not reach the database" {
-		t.Errorf("UserMessage() = %q, want the error's own message", got)
+	// ErrCodeDatabaseConnection isn't in the client-input-shaped category
+	// mayExposeOwnMessage trusts by default, so UserMessage falls back to
+	// the generic per-code message regardless of whether there's a cause -
+	// only SetPublicMessage can surface a database error's own text.
+	if want := defaultMessageForCode(ErrCodeDatabaseConnection); UserMessage(err) != want {
+		t.Errorf("UserMessage() = %q, want the generic default %q", UserMessage(err), want)
 	}
 }
 
@@ -614,6 +616,37 @@ func TestPublicMessage(t *testing.T) {
 	wrapped := fmt.Errorf("service layer: %w", err)
 	if got := UserMessage(wrapped); got != msg {
 		t.Errorf("UserMessage(wrapped) = %q, want the public message override %q (should unwrap via errors.As)", got, msg)
+	}
+}
+
+func TestMayExposeOwnMessageIsCategoryBased(t *testing.T) {
+	// WrapValidationError always sets a cause, but its message is still an
+	// explicit caller argument (never derived from the cause) - under the
+	// category-based policy it's shown, unlike the old cause-presence rule
+	// which hid every Wrap* message regardless of code.
+	secret := errors.New("regexp compile failed: (?P<bad")
+	wrapped := WrapValidationError(secret, "email must be a valid address", "email")
+	if got, want := UserMessage(wrapped), "email must be a valid address"; got != want {
+		t.Errorf("UserMessage() = %q, want %q", got, want)
+	}
+	if strings.Contains(UserMessage(wrapped), "regexp") {
+		t.Errorf("UserMessage() leaked the wrapped cause: %q", UserMessage(wrapped))
+	}
+
+	// NewInternalError has no cause, but ErrCodeInternal isn't in the
+	// trusted category - its own message must not be surfaced automatically.
+	internal := NewInternalError("billing", "stripe secret sk_live_do_not_leak rejected")
+	if got := UserMessage(internal); strings.Contains(got, "sk_live") {
+		t.Errorf("UserMessage() = %q, leaked NewInternalError's own message despite no SetPublicMessage override", got)
+	}
+	if got, want := UserMessage(internal), defaultMessageForCode(ErrCodeInternal); got != want {
+		t.Errorf("UserMessage() = %q, want the generic default %q", got, want)
+	}
+
+	// An explicit SetPublicMessage override still wins regardless of category.
+	internal.SetPublicMessage("We're investigating a billing issue.")
+	if got, want := UserMessage(internal), "We're investigating a billing issue."; got != want {
+		t.Errorf("UserMessage() = %q, want the SetPublicMessage override %q", got, want)
 	}
 }
 

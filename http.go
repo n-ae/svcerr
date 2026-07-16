@@ -101,6 +101,16 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 	logError(logger, err, statusCode)
 }
 
+// WriteJSON writes err's standardized JSON error response to w and returns
+// the HTTP status code used - the same body WriteHTTPError writes, minus
+// the logging call, for a caller that wants to own reporting separately
+// (its own Reporter, a nil Logger via WriteHTTPError, or none at all)
+// instead of participating in this package's Logger contract just to
+// render a response.
+func WriteJSON(w http.ResponseWriter, err error) int {
+	return writeJSONErrorBody(w, err)
+}
+
 // writeJSONErrorBody writes err's JSON body and headers to w and returns the
 // status code used, without logging. Split out of WriteHTTPError so
 // RecoveryMiddleware can write the response and log the panic as a single
@@ -137,6 +147,11 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
 	statusCode := writeHTMLErrorBody(w, err)
 	logError(logger, err, statusCode)
+}
+
+// WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML writes.
+func WriteHTML(w http.ResponseWriter, err error) int {
+	return writeHTMLErrorBody(w, err)
 }
 
 // writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
@@ -204,14 +219,22 @@ func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
 	logError(logger, err, statusCode)
 }
 
+// WriteProblem mirrors WriteJSON for the RFC 9457 rendering WriteHTTPProblem writes.
+func WriteProblem(w http.ResponseWriter, err error) int {
+	return writeProblemJSONBody(w, err)
+}
+
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
 func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 	code := GetErrorCode(err)
 	statusCode := HTTPStatusCode(code)
 
 	problem := ProblemDetails{
-		Type:       "about:blank",
-		Title:      defaultMessageForCode(code),
+		Type: "about:blank",
+		// RFC 9457 4.2.1: when type is "about:blank", title SHOULD be the
+		// same as the HTTP status's reason phrase (e.g. "Not Found" for
+		// 404) - the occurrence-specific text belongs in Detail, not Title.
+		Title:      http.StatusText(statusCode),
 		Status:     statusCode,
 		Detail:     getUserFriendlyMessage(code, err),
 		Code:       code,
@@ -239,9 +262,31 @@ func UserMessage(err error) string {
 	return getUserFriendlyMessage(GetErrorCode(err), err)
 }
 
+// mayExposeOwnMessage reports whether an error carrying code is safe to
+// show its own message as public-facing text, absent an explicit
+// SetPublicMessage override. Client-input-shaped categories - validation,
+// not-found, conflict, auth, rate-limiting - are written by the calling
+// code specifically to be read by the client (e.g. NewValidationError's
+// message, or WrapValidationError's - both are an explicit argument the
+// caller chose, never derived from the wrapped cause), so they're safe by
+// default. Database, external-API, and internal errors often carry
+// operational detail (queries, hosts, upstream response bodies) even in
+// their own message, so those always fall back to the generic per-code
+// message unless the caller opts in via SetPublicMessage.
+func mayExposeOwnMessage(code ErrorCode) bool {
+	switch code {
+	case ErrCodeInvalidInput, ErrCodeMissingRequired, ErrCodeInvalidFormat, ErrCodeConstraintViolation,
+		ErrCodeUnauthorized, ErrCodeTokenExpired, ErrCodeTokenInvalid, ErrCodePermissionDenied,
+		ErrCodeNotFound, ErrCodeAlreadyExists, ErrCodeResourceConflict,
+		ErrCodeRateLimitExceeded, ErrCodeQuotaExceeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // getUserFriendlyMessage returns a user-friendly error message
 func getUserFriendlyMessage(code ErrorCode, err error) string {
-	// If it's a known error type, use its message
 	if err != nil {
 		// An explicit SetPublicMessage override always wins.
 		var pm PublicMessager
@@ -251,26 +296,23 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 			}
 		}
 
-		// Error() is only safe to surface as-is when the error wasn't
-		// built by wrapping another error (Wrap*) - a wrapped cause's
-		// text may carry internal detail (raw SQL, connection strings,
-		// third-party error text) that must never reach a client without
-		// an explicit SetPublicMessage override. This only needs a coded,
-		// unwrappable error - not the full ErrorWithCode (no StackTrace
-		// requirement) - so a minimal external error type implementing
-		// just Coder, error, and Unwrap still gets this safety property.
-		var cu interface {
-			error
-			Coder
-			Unwrap() error
-		}
-		if errors.As(err, &cu) && cu.Unwrap() == nil {
-			// For validation errors, include field information
-			var ve *ValidationError
-			if errors.As(err, &ve) && ve.Field != "" {
-				return ve.Error()
+		// Only the outermost coded node's own message - never Error(),
+		// which would append a wrapped cause's text - and only for
+		// categories mayExposeOwnMessage trusts by default.
+		if mayExposeOwnMessage(code) {
+			node := outermostCoded(err)
+			if m, ok := node.(ownMessager); ok {
+				return m.ownMessage()
 			}
-			return cu.Error()
+			// node doesn't implement ownMessage (e.g. an external Coder
+			// type that doesn't embed BaseError) - fall back to the same
+			// safety rule ownMessage replaces for this package's own
+			// types: Error() is only trusted when the node doesn't wrap a
+			// further cause, since without an ownMessage accessor there's
+			// no way to know its Error() text excludes the cause.
+			if u, ok := node.(interface{ Unwrap() error }); ok && u.Unwrap() == nil {
+				return node.Error()
+			}
 		}
 	}
 
@@ -417,7 +459,22 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 // logError logs error with appropriate level and context
 func logError(logger Logger, err error, statusCode int) {
 	level, fields := errorLogFields(err, statusCode)
-	logger.Log(level, err, fields, "HTTP error response")
+	safeLog(logger, level, err, fields, "HTTP error response")
+}
+
+// safeLog calls logger.Log if logger is non-nil. A nil Logger is
+// tolerated (not an error) everywhere this package logs, so
+// WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem/RecoveryMiddleware
+// stay usable by a caller that doesn't want logging at all, without
+// forcing them to plumb through a no-op implementation just to avoid a
+// nil-pointer panic. Callers who want response rendering with no logging
+// contract whatsoever can use WriteJSON/WriteHTML/WriteProblem directly
+// instead of passing nil here.
+func safeLog(logger Logger, level Level, err error, fields map[string]interface{}, msg string) {
+	if logger == nil {
+		return
+	}
+	logger.Log(level, err, fields, msg)
 }
 
 // trackingResponseWriter records whether a response has already been
@@ -529,7 +586,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 					fields["method"] = r.Method
 					fields["path"] = r.URL.Path
 					fields["response_committed_status"] = tw.status
-					logger.Log(LevelError, err, fields, "Panic recovered in HTTP handler after response was already committed")
+					safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler after response was already committed")
 					return
 				}
 
@@ -539,7 +596,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				fields["panic"] = rec
 				fields["method"] = r.Method
 				fields["path"] = r.URL.Path
-				logger.Log(LevelError, err, fields, "Panic recovered in HTTP handler")
+				safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler")
 			}()
 
 			next.ServeHTTP(tw, r)

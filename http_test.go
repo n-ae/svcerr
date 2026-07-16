@@ -447,8 +447,8 @@ func TestWriteHTTPProblem(t *testing.T) {
 		if resp["type"] != "about:blank" {
 			t.Errorf(`resp["type"] = %v, want "about:blank"`, resp["type"])
 		}
-		if resp["title"] != "The requested resource was not found." {
-			t.Errorf(`resp["title"] = %v, want the code-generic message`, resp["title"])
+		if resp["title"] != "Not Found" {
+			t.Errorf(`resp["title"] = %v, want the HTTP status's reason phrase (RFC 9457 4.2.1, since type is "about:blank")`, resp["title"])
 		}
 		if resp["status"] != float64(http.StatusNotFound) {
 			t.Errorf(`resp["status"] = %v, want %d`, resp["status"], http.StatusNotFound)
@@ -511,6 +511,89 @@ func TestWriteHTTPErrorHTMLEscapesMessage(t *testing.T) {
 	if !strings.Contains(body, "&lt;script&gt;") {
 		t.Errorf("body missing escaped message: %s", body)
 	}
+}
+
+func TestWriteHTTPErrorToleratesNilLogger(t *testing.T) {
+	// A nil Logger must not panic - callers who only want the response
+	// rendered (no logging contract) can pass nil instead of a no-op
+	// implementation.
+	for name, write := range map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			write(w, NewNotFoundError("league", "1"), nil)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
+
+func TestRecoveryMiddlewareToleratesNilLogger(t *testing.T) {
+	handler := RecoveryMiddleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	}))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestPureRenderFunctions(t *testing.T) {
+	// WriteJSON/WriteHTML/WriteProblem mirror their WriteHTTP*
+	// counterparts' body and status exactly, minus the logging call.
+	err := NewNotFoundError("league", "1")
+
+	t.Run("WriteJSON", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		status := WriteJSON(w, err)
+
+		logged := httptest.NewRecorder()
+		WriteHTTPError(logged, err, &recordingLogger{})
+
+		if status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		if w.Body.String() != logged.Body.String() {
+			t.Errorf("WriteJSON body = %q, want the same body as WriteHTTPError: %q", w.Body.String(), logged.Body.String())
+		}
+	})
+
+	t.Run("WriteHTML", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		status := WriteHTML(w, err)
+
+		logged := httptest.NewRecorder()
+		WriteHTTPErrorHTML(logged, err, &recordingLogger{})
+
+		if status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		if w.Body.String() != logged.Body.String() {
+			t.Errorf("WriteHTML body = %q, want the same body as WriteHTTPErrorHTML: %q", w.Body.String(), logged.Body.String())
+		}
+	})
+
+	t.Run("WriteProblem", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		status := WriteProblem(w, err)
+
+		logged := httptest.NewRecorder()
+		WriteHTTPProblem(logged, err, &recordingLogger{})
+
+		if status != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		if w.Body.String() != logged.Body.String() {
+			t.Errorf("WriteProblem body = %q, want the same body as WriteHTTPProblem: %q", w.Body.String(), logged.Body.String())
+		}
+	})
 }
 
 func TestWrappedInternalDetailNotLeakedToClient(t *testing.T) {

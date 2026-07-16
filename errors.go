@@ -170,6 +170,16 @@ func (e *BaseError) PublicMessage() (string, bool) {
 	return e.publicMessage, e.publicMessage != ""
 }
 
+// ownMessage returns e.message alone, never a wrapped cause's text -
+// unlike Error(), which appends the cause when one is set. Every
+// constructor in this package (New, Wrap, and every semantic New*/Wrap*
+// pair) takes message as an explicit caller-supplied argument rather than
+// deriving it from a wrapped error, so this is always safe to treat as
+// caller-controlled text regardless of whether the error wraps a cause.
+func (e *BaseError) ownMessage() string {
+	return e.message
+}
+
 // Compile-time checks that BaseError - and so every type in this package,
 // which all embed it - satisfies each capability interface individually as
 // well as their combination.
@@ -564,6 +574,14 @@ func outermostCoded(err error) coderError {
 		return c
 	}
 	return nil
+}
+
+// ownMessager is implemented by every BaseError-derived type via
+// promotion; getUserFriendlyMessage checks it through a type assertion on
+// outermostCoded's result rather than errors.As, since it only ever wants
+// the outermost node's own message, never a deeper one in the chain.
+type ownMessager interface {
+	ownMessage() string
 }
 
 // GetErrorCode extracts the error code from an error. It only requires
