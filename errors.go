@@ -540,14 +540,39 @@ func WrapInternalError(err error, component, message string) *InternalError {
 // here - use stdlib errors.As(err, &target) directly, which does the same
 // thing without a per-type wrapper to maintain.
 
+// coderError pairs error with Coder for outermostCoded's errors.As search.
+// Every element of an error chain already satisfies error (that's what
+// Unwrap returns), so requiring it here doesn't narrow the search beyond
+// what a plain Coder target would already match.
+type coderError interface {
+	error
+	Coder
+}
+
+// outermostCoded returns the first error in err's chain that carries an
+// application ErrorCode - the same node GetErrorCode's return value comes
+// from. Callers that need type-specific data (a validation field, a
+// retry-after value, a resource ID, ...) should derive it from this one
+// node rather than independently re-scanning the whole chain with their
+// own errors.As call. Otherwise an outer wrapper's code (e.g.
+// ErrCodeInternal from WrapInternalError) can end up paired with a wrapped
+// error's details (e.g. a NotFoundError's resource ID), leaking structured
+// data that the wrapping was meant to hide.
+func outermostCoded(err error) coderError {
+	var c coderError
+	if errors.As(err, &c) {
+		return c
+	}
+	return nil
+}
+
 // GetErrorCode extracts the error code from an error. It only requires
 // Coder, not the full ErrorWithCode - a custom error type that implements
 // just Code() ErrorCode is picked up here (and so by HTTPStatusCode) even
 // if it doesn't also implement Unwrap or StackTrace.
 func GetErrorCode(err error) ErrorCode {
-	var c Coder
-	if errors.As(err, &c) {
-		return c.Code()
+	if node := outermostCoded(err); node != nil {
+		return node.Code()
 	}
 	return ErrCodeInternal
 }

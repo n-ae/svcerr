@@ -120,9 +120,10 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// Add Retry-After header for rate limit errors
-	var rle *RateLimitError
-	if errors.As(err, &rle) {
+	// Add Retry-After header for rate limit errors - keyed off the same
+	// outermost-coded node as extractErrorDetails, so an outer wrapper's
+	// code can't inherit a wrapped RateLimitError's header.
+	if rle, ok := outermostCoded(err).(*RateLimitError); ok {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 	}
 
@@ -219,8 +220,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 
 	w.Header().Set("Content-Type", "application/problem+json")
 
-	var rle *RateLimitError
-	if errors.As(err, &rle) {
+	if rle, ok := outermostCoded(err).(*RateLimitError); ok {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 	}
 
@@ -319,45 +319,41 @@ func defaultMessageForCode(code ErrorCode) string {
 	}
 }
 
-// extractErrorDetails extracts contextual details from error
+// extractErrorDetails extracts contextual details from the outermost coded
+// error in err's chain - the same node whose code selects the HTTP status
+// and message (see outermostCoded) - so a wrapper's code is never paired
+// with a wrapped error's details.
 func extractErrorDetails(err error) map[string]interface{} {
 	details := make(map[string]interface{})
 
-	// Extract details from custom error types
-	var ve *ValidationError
-	var de *DatabaseError
-	var ee *ExternalAPIError
-	var ne *NotFoundError
-	var rle *RateLimitError
-
-	switch {
-	case errors.As(err, &ve):
-		if ve.Field != "" {
-			details["field"] = ve.Field
+	switch v := outermostCoded(err).(type) {
+	case *ValidationError:
+		if v.Field != "" {
+			details["field"] = v.Field
 		}
-		// ve.Value is deliberately not included here - it's whatever the
+		// v.Value is deliberately not included here - it's whatever the
 		// caller passed in (a password, a token, an oversized payload),
 		// and this package has no way to know it's safe to publish.
-	case errors.As(err, &de):
-		if de.Operation != "" {
-			details["operation"] = de.Operation
+	case *DatabaseError:
+		if v.Operation != "" {
+			details["operation"] = v.Operation
 		}
-	case errors.As(err, &ee):
-		details["service"] = ee.Service
-		if ee.StatusCode > 0 {
-			details["status_code"] = ee.StatusCode
+	case *ExternalAPIError:
+		details["service"] = v.Service
+		if v.StatusCode > 0 {
+			details["status_code"] = v.StatusCode
 		}
-		if ee.RetryAfter != nil {
-			details["retry_after"] = *ee.RetryAfter
+		if v.RetryAfter != nil {
+			details["retry_after"] = *v.RetryAfter
 		}
-	case errors.As(err, &ne):
-		details["resource_type"] = ne.ResourceType
-		if ne.ResourceID != "" {
-			details["resource_id"] = ne.ResourceID
+	case *NotFoundError:
+		details["resource_type"] = v.ResourceType
+		if v.ResourceID != "" {
+			details["resource_id"] = v.ResourceID
 		}
-	case errors.As(err, &rle):
-		details["limit"] = rle.Limit
-		details["retry_after"] = rle.RetryAfter
+	case *RateLimitError:
+		details["limit"] = v.Limit
+		details["retry_after"] = v.RetryAfter
 	}
 
 	if len(details) == 0 {
@@ -452,11 +448,27 @@ func (w *trackingResponseWriter) Write(b []byte) (int, error) {
 // Flush implements http.Flusher by delegating to the wrapped
 // ResponseWriter when it supports flushing (e.g. for SSE handlers), and is
 // a no-op otherwise - http.Flusher's signature has no way to report "not
-// supported".
+// supported". A flush commits the response (implicitly as 200 OK if no
+// status was written yet) the same way Write does, so it's recorded the
+// same way - otherwise RecoveryMiddleware could still believe the response
+// is uncommitted after a flush and write a second, corrupting body on top
+// of it if the handler subsequently panics.
 func (w *trackingResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		w.status = http.StatusOK
+	}
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Unwrap exposes the wrapped ResponseWriter to http.ResponseController,
+// which looks for this method (or the original ResponseWriter itself) to
+// reach capabilities like SetReadDeadline/SetWriteDeadline through a
+// wrapper such as this one.
+func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // Hijack implements http.Hijacker by delegating to the wrapped

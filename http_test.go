@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -278,7 +279,20 @@ func TestWriteHTTPError(t *testing.T) {
 		}
 	})
 
-	t.Run("rate limit error wrapped still sets Retry-After header", func(t *testing.T) {
+	t.Run("rate limit error wrapped by a plain stdlib wrapper still sets Retry-After header", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		inner := NewRateLimitError("yahoo", 300, 60)
+		wrapped := fmt.Errorf("propagated: %w", inner)
+
+		WriteHTTPError(w, wrapped, logger)
+
+		if got := w.Header().Get("Retry-After"); got != "60" {
+			t.Errorf("Retry-After = %q, want 60 (fmt.Errorf doesn't establish a new code, so the RateLimitError is still the outermost coded node)", got)
+		}
+	})
+
+	t.Run("rate limit error wrapped under a different code does not leak Retry-After header", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}
 		inner := NewRateLimitError("yahoo", 300, 60)
@@ -286,8 +300,28 @@ func TestWriteHTTPError(t *testing.T) {
 
 		WriteHTTPError(w, wrapped, logger)
 
-		if got := w.Header().Get("Retry-After"); got != "60" {
-			t.Errorf("Retry-After = %q, want 60 (should unwrap via errors.As)", got)
+		if got := w.Header().Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q, want empty (outer code is ErrCodeInternal, so the inner RateLimitError's header must not leak)", got)
+		}
+	})
+
+	t.Run("wrapping under a different code hides the inner error's public details", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		inner := NewNotFoundError("user", "secret@example.com")
+		wrapped := WrapInternalError(inner, "user_service", "unexpected repository result")
+
+		WriteHTTPError(w, wrapped, logger)
+
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if resp.Error.Code != ErrCodeInternal {
+			t.Errorf("Error.Code = %q, want %q", resp.Error.Code, ErrCodeInternal)
+		}
+		if resp.Error.Details != nil {
+			t.Errorf("Error.Details = %v, want nil (the inner NotFoundError's resource_type/resource_id must not leak through the outer INTERNAL_ERROR classification)", resp.Error.Details)
 		}
 	})
 
@@ -572,6 +606,25 @@ func TestTrackingResponseWriterFlush(t *testing.T) {
 	if !rec.Flushed {
 		t.Error("Flush() did not delegate to the underlying ResponseWriter")
 	}
+	if !tw.wroteHeader {
+		t.Error("Flush() should mark the response committed, the same way Write/WriteHeader do, so RecoveryMiddleware won't append a second body after a later panic")
+	}
+	if tw.status != http.StatusOK {
+		t.Errorf("tw.status = %d, want %d (Flush with no prior WriteHeader implies 200)", tw.status, http.StatusOK)
+	}
+}
+
+func TestTrackingResponseWriterUnwrap(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	u, ok := (http.ResponseWriter)(tw).(interface{ Unwrap() http.ResponseWriter })
+	if !ok {
+		t.Fatal("trackingResponseWriter should implement Unwrap() http.ResponseWriter for http.ResponseController")
+	}
+	if u.Unwrap() != rec {
+		t.Error("Unwrap() did not return the underlying ResponseWriter")
+	}
 }
 
 func TestTrackingResponseWriterHijack(t *testing.T) {
@@ -784,6 +837,33 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
 			t.Errorf("response_committed_status field = %v, want %v (Write alone should default the tracked status to 200)", logger.calls[0].fields["response_committed_status"], http.StatusOK)
+		}
+	})
+
+	t.Run("response committed via Flush without WriteHeader is not appended to", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// No explicit WriteHeader or Write - just a flush, which
+			// commits an implicit 200 the same way Write does.
+			w.(http.Flusher).Flush()
+			panic("boom after flush")
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if got := w.Body.String(); got != "" {
+			t.Errorf("body = %q, want empty (Flush commits the response, so no error JSON should be appended on top of it)", got)
+		}
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
+		}
+		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
+			t.Errorf("response_committed_status field = %v, want %v (Flush alone should default the tracked status to 200)", logger.calls[0].fields["response_committed_status"], http.StatusOK)
 		}
 	})
 
