@@ -107,8 +107,8 @@ func HTTPStatusCode(code ErrorCode) int {
 
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
-	statusCode := writeJSONErrorBody(w, err)
-	logError(logger, err, statusCode)
+	statusCode, renderErr := writeJSONErrorBody(w, err)
+	logError(logger, err, statusCode, renderErr)
 }
 
 // WriteJSON writes err's standardized JSON error response to w and returns
@@ -118,17 +118,21 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 // instead of participating in this package's Logger contract just to
 // render a response.
 func WriteJSON(w http.ResponseWriter, err error) int {
-	return writeJSONErrorBody(w, err)
+	statusCode, _ := writeJSONErrorBody(w, err)
+	return statusCode
 }
 
-// writeJSONErrorBody writes err's JSON body and headers to w and returns the
-// status code used, without logging. Split out of WriteHTTPError so
+// writeJSONErrorBody writes err's JSON body and headers to w and returns
+// the status code used, without logging, plus the marshal error when the
+// real body couldn't be encoded and a generic fallback was substituted
+// instead (nil otherwise) - the caller decides what to do with that (log
+// it, in WriteHTTPError's case). Split out of WriteHTTPError so
 // RecoveryMiddleware can write the response and log the panic as a single
 // record instead of the response write and the log call each logging
 // independently.
-func writeJSONErrorBody(w http.ResponseWriter, err error) int {
+func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, renderErr error) {
 	code := GetErrorCode(err)
-	statusCode := HTTPStatusCode(code)
+	statusCode = HTTPStatusCode(code)
 
 	errResp := HTTPErrorResponse{
 		Error: ErrorDetail{
@@ -147,6 +151,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 	if marshalErr != nil {
 		statusCode = http.StatusInternalServerError
 		body = fallbackErrorBody(ErrCodeInternal)
+		renderErr = marshalErr
 	}
 
 	prepareErrorHeaders(w.Header(), "application/json")
@@ -165,7 +170,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(body)
 
-	return statusCode
+	return statusCode, renderErr
 }
 
 // prepareErrorHeaders resets the response headers this package's writers
@@ -177,15 +182,21 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) int {
 // value can cause client-side truncation or a real server's
 // ResponseWriter to reject or truncate the write. Trailer is deleted
 // because any trailers it announced won't be sent, since this response
-// has none.
+// has none. Content-Encoding is deleted because the body these writers
+// produce is always plain, uncompressed text - a handler that set it
+// while planning to write compressed bytes itself (rather than relying on
+// an outer compression middleware that transparently wraps the
+// ResponseWriter and sets the header itself after compressing whatever's
+// written) would otherwise leave clients trying to gzip-decode a body
+// that was never actually compressed.
 //
-// This deliberately doesn't touch Content-Encoding, ETag, Last-Modified,
-// or Accept-Ranges, matching http.Error's own scope - deleting
-// Content-Encoding in particular could interfere with an outer compression
-// middleware that wraps this package's writers and coordinates through
-// that header.
+// This still deliberately doesn't touch ETag, Last-Modified, or
+// Accept-Ranges - those describe a specific successful representation
+// this response isn't attempting to be, but aren't actively misleading
+// the way a wrong Content-Length or Content-Encoding is.
 func prepareErrorHeaders(h http.Header, contentType string) {
 	h.Del("Content-Length")
+	h.Del("Content-Encoding")
 	h.Del("Trailer")
 	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -208,7 +219,7 @@ func fallbackErrorBody(code ErrorCode) []byte {
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
 	statusCode := writeHTMLErrorBody(w, err)
-	logError(logger, err, statusCode)
+	logError(logger, err, statusCode, nil)
 }
 
 // WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML writes.
@@ -277,19 +288,20 @@ func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 // includes a wrapped cause's text without an explicit SetPublicMessage),
 // and logging behave identically to WriteHTTPError.
 func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
-	statusCode := writeProblemJSONBody(w, err)
-	logError(logger, err, statusCode)
+	statusCode, renderErr := writeProblemJSONBody(w, err)
+	logError(logger, err, statusCode, renderErr)
 }
 
 // WriteProblem mirrors WriteJSON for the RFC 9457 rendering WriteHTTPProblem writes.
 func WriteProblem(w http.ResponseWriter, err error) int {
-	return writeProblemJSONBody(w, err)
+	statusCode, _ := writeProblemJSONBody(w, err)
+	return statusCode
 }
 
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
-func writeProblemJSONBody(w http.ResponseWriter, err error) int {
+func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, renderErr error) {
 	code := GetErrorCode(err)
-	statusCode := HTTPStatusCode(code)
+	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
 
 	problemType := "about:blank"
@@ -331,6 +343,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 	if marshalErr != nil {
 		statusCode = http.StatusInternalServerError
 		body = fallbackProblemBody(statusCode)
+		renderErr = marshalErr
 	}
 
 	prepareErrorHeaders(w.Header(), "application/problem+json")
@@ -344,7 +357,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(body)
 
-	return statusCode
+	return statusCode, renderErr
 }
 
 // fallbackProblemBody mirrors fallbackErrorBody for the problem+json body -
@@ -589,9 +602,19 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 	return level, fields
 }
 
-// logError logs error with appropriate level and context
-func logError(logger Logger, err error, statusCode int) {
+// logError logs error with appropriate level and context. renderErr is
+// the marshal error from writeJSONErrorBody/writeProblemJSONBody when the
+// real response body couldn't be encoded and a generic fallback was
+// substituted (nil otherwise) - logged as its own field, together with
+// the code the client actually received, so the log doesn't just show
+// err's original classification with no indication the client got a
+// different one.
+func logError(logger Logger, err error, statusCode int, renderErr error) {
 	level, fields := errorLogFields(err, statusCode)
+	if renderErr != nil {
+		fields["response_render_error"] = renderErr.Error()
+		fields["rendered_error_code"] = string(ErrCodeInternal)
+	}
 	safeLog(logger, level, err, fields, "HTTP error response")
 }
 
@@ -683,6 +706,28 @@ func commitOnFlush(tw *trackingResponseWriter, f http.Flusher) {
 	f.Flush()
 }
 
+// flushErrorer is the optional method http.ResponseController prefers
+// over plain http.Flusher, for an underlying writer that can report a
+// flush failure - http.Flusher's Flush() has no return value and so no
+// way to signal one. Documented by http.NewResponseController; not a
+// named type in net/http.
+type flushErrorer interface {
+	FlushError() error
+}
+
+// commitOnFlushError delegates to fe.FlushError(), only marking tw
+// committed when it reports success - unlike commitOnFlush, which has no
+// error to check and so always marks committed. A real flush failure must
+// not be treated as though the response were successfully sent.
+func commitOnFlushError(tw *trackingResponseWriter, fe flushErrorer) error {
+	err := fe.FlushError()
+	if err == nil && !tw.wroteHeader {
+		tw.wroteHeader = true
+		tw.status = http.StatusOK
+	}
+	return err
+}
+
 // commitOnHijack hijacks through hj, marking tw committed on success -
 // shared by hijackTracker and flushHijackTracker, the only two variants
 // that ever call it (both are only constructed when the underlying writer
@@ -699,13 +744,35 @@ func commitOnHijack(tw *trackingResponseWriter, hj http.Hijacker) (net.Conn, *bu
 }
 
 // flushTracker adds http.Flusher to trackingResponseWriter, for an
-// underlying writer that supports flushing but not hijacking.
+// underlying writer that supports plain flushing (but not FlushError or
+// hijacking).
 type flushTracker struct {
 	*trackingResponseWriter
 	flusher http.Flusher
 }
 
 func (w *flushTracker) Flush() { commitOnFlush(w.trackingResponseWriter, w.flusher) }
+
+// flushErrorTracker adds http.Flusher and FlushError() error to
+// trackingResponseWriter, for an underlying writer that reports flush
+// failures (but doesn't support hijacking). Flush() discards the error -
+// http.Flusher's signature has no way to report one - but still delegates
+// through FlushError so a real failure isn't treated as a successful
+// commit; FlushError() itself is what http.ResponseController actually
+// calls (it checks for this method before plain Flusher), which is the
+// entire reason this variant exists separately from flushTracker.
+type flushErrorTracker struct {
+	*trackingResponseWriter
+	flushErrorer flushErrorer
+}
+
+func (w *flushErrorTracker) Flush() {
+	_ = commitOnFlushError(w.trackingResponseWriter, w.flushErrorer)
+}
+
+func (w *flushErrorTracker) FlushError() error {
+	return commitOnFlushError(w.trackingResponseWriter, w.flushErrorer)
+}
 
 // hijackTracker adds http.Hijacker to trackingResponseWriter, for an
 // underlying writer that supports hijacking but not flushing.
@@ -733,17 +800,48 @@ func (w *flushHijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return commitOnHijack(w.trackingResponseWriter, w.hijacker)
 }
 
+// flushErrorHijackTracker adds http.Flusher, FlushError() error, and
+// http.Hijacker to trackingResponseWriter, for an underlying writer that
+// reports flush failures and supports hijacking.
+type flushErrorHijackTracker struct {
+	*trackingResponseWriter
+	flushErrorer flushErrorer
+	hijacker     http.Hijacker
+}
+
+func (w *flushErrorHijackTracker) Flush() {
+	_ = commitOnFlushError(w.trackingResponseWriter, w.flushErrorer)
+}
+
+func (w *flushErrorHijackTracker) FlushError() error {
+	return commitOnFlushError(w.trackingResponseWriter, w.flushErrorer)
+}
+
+func (w *flushErrorHijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return commitOnHijack(w.trackingResponseWriter, w.hijacker)
+}
+
 // newTrackingResponseWriter wraps w for RecoveryMiddleware's commit
 // tracking. It returns the http.ResponseWriter to pass to the handler -
 // implementing http.Flusher and/or http.Hijacker if and only if w itself
-// does - and the *trackingResponseWriter base to read wroteHeader/status
-// from afterward regardless of which variant was returned (every variant
-// embeds it by pointer, so its state is shared either way).
+// does, and FlushError() error too when w implements that (checked ahead
+// of plain http.Flusher, matching http.ResponseController's own
+// priority - see flushErrorer) - and the *trackingResponseWriter base to
+// read wroteHeader/status from afterward regardless of which variant was
+// returned (every variant embeds it by pointer, so its state is shared
+// either way).
 func newTrackingResponseWriter(w http.ResponseWriter) (http.ResponseWriter, *trackingResponseWriter) {
 	base := &trackingResponseWriter{ResponseWriter: w}
-	flusher, flushable := w.(http.Flusher)
 	hijacker, hijackable := w.(http.Hijacker)
 
+	if flushErr, ok := w.(flushErrorer); ok {
+		if hijackable {
+			return &flushErrorHijackTracker{trackingResponseWriter: base, flushErrorer: flushErr, hijacker: hijacker}, base
+		}
+		return &flushErrorTracker{trackingResponseWriter: base, flushErrorer: flushErr}, base
+	}
+
+	flusher, flushable := w.(http.Flusher)
 	switch {
 	case flushable && hijackable:
 		return &flushHijackTracker{trackingResponseWriter: base, flusher: flusher, hijacker: hijacker}, base
@@ -801,7 +899,12 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 					return
 				}
 
-				statusCode := writeJSONErrorBody(tw, err)
+				// err here is always this package's own WrapInternalError/
+				// NewInternalError, whose Details are always nil - it
+				// can't produce a marshal failure the way a caller's own
+				// SetPublicDetail could, so unlike WriteHTTPError there's
+				// no render error worth plumbing through here.
+				statusCode, _ := writeJSONErrorBody(tw, err)
 
 				_, fields := errorLogFields(err, statusCode)
 				fields["panic"] = rec

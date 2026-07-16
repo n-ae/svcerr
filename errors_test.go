@@ -981,7 +981,7 @@ func TestHTTPHelpersUnwrapWrappedErrors(t *testing.T) {
 	var loggedFields map[string]interface{}
 	logError(loggerFunc(func(_ Level, _ error, fields map[string]interface{}, _ string) {
 		loggedFields = fields
-	}), wrapped, http.StatusBadRequest)
+	}), wrapped, http.StatusBadRequest, nil)
 
 	if loggedFields["field"] != "email" {
 		t.Errorf("logError() fields[\"field\"] = %v, want email", loggedFields["field"])

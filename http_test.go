@@ -596,6 +596,7 @@ func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {
 			w := httptest.NewRecorder()
 			w.Header().Set("Content-Length", "999")
 			w.Header().Set("Trailer", "X-Would-Have-Been-A-Trailer")
+			w.Header().Set("Content-Encoding", "gzip")
 
 			write(w, NewInternalError("test", "boom"), nil)
 
@@ -604,6 +605,9 @@ func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {
 			}
 			if got := w.Header().Get("Trailer"); got != "" {
 				t.Errorf("Trailer = %q, want cleared (no trailers are actually sent)", got)
+			}
+			if got := w.Header().Get("Content-Encoding"); got != "" {
+				t.Errorf("Content-Encoding = %q, want cleared (the body is always plain, uncompressed text)", got)
 			}
 			if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 				t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
@@ -635,6 +639,70 @@ func TestWriteJSONFallsBackOnUnencodableDetail(t *testing.T) {
 	}
 	if resp.Error.Code != ErrCodeInternal {
 		t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+	}
+}
+
+func TestWriteHTTPErrorLogsRenderFailureOnUnencodableDetail(t *testing.T) {
+	// The client-visible response falls back to a generic INTERNAL_ERROR
+	// (TestWriteJSONFallsBackOnUnencodableDetail), but that alone gives no
+	// way to diagnose why - the log line must say a marshal failure
+	// happened and what the client actually received differed from the
+	// error's own classification.
+	w := httptest.NewRecorder()
+	logger := &recordingLogger{}
+	err := NewValidationError("bad input", "name", nil)
+	err.SetPublicDetail("bad", make(chan int))
+
+	WriteHTTPError(w, err, logger)
+
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+	}
+	fields := logger.calls[0].fields
+	if fields["error_code"] != string(ErrCodeInvalidInput) {
+		t.Errorf(`fields["error_code"] = %v, want %q (the error's own, original classification)`, fields["error_code"], ErrCodeInvalidInput)
+	}
+	if fields["rendered_error_code"] != string(ErrCodeInternal) {
+		t.Errorf(`fields["rendered_error_code"] = %v, want %q (what the client actually received)`, fields["rendered_error_code"], ErrCodeInternal)
+	}
+	renderErr, ok := fields["response_render_error"].(string)
+	if !ok || renderErr == "" {
+		t.Errorf(`fields["response_render_error"] = %v, want a non-empty marshal error message`, fields["response_render_error"])
+	}
+}
+
+func TestWriteHTTPProblemLogsRenderFailureOnUnencodableDetail(t *testing.T) {
+	w := httptest.NewRecorder()
+	logger := &recordingLogger{}
+	err := New(ErrCodeInvalidInput, "invalid")
+	err.SetPublicDetail("bad", make(chan int))
+
+	WriteHTTPProblem(w, err, logger)
+
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+	}
+	fields := logger.calls[0].fields
+	if fields["rendered_error_code"] != string(ErrCodeInternal) {
+		t.Errorf(`fields["rendered_error_code"] = %v, want %q`, fields["rendered_error_code"], ErrCodeInternal)
+	}
+	if _, ok := fields["response_render_error"]; !ok {
+		t.Error(`fields["response_render_error"] missing, want the marshal error message`)
+	}
+}
+
+func TestWriteHTTPErrorDoesNotLogRenderFailureOnSuccess(t *testing.T) {
+	w := httptest.NewRecorder()
+	logger := &recordingLogger{}
+
+	WriteHTTPError(w, NewNotFoundError("league", "1"), logger)
+
+	fields := logger.calls[0].fields
+	if _, ok := fields["response_render_error"]; ok {
+		t.Errorf(`fields["response_render_error"] = %v, want the key entirely absent when marshaling succeeded`, fields["response_render_error"])
+	}
+	if _, ok := fields["rendered_error_code"]; ok {
+		t.Errorf(`fields["rendered_error_code"] = %v, want the key entirely absent when marshaling succeeded`, fields["rendered_error_code"])
 	}
 }
 
@@ -957,6 +1025,95 @@ func TestResponseControllerReportsUnsupportedCapabilitiesCorrectly(t *testing.T)
 	if _, _, err := controller.Hijack(); err == nil {
 		t.Error("ResponseController.Hijack() error = nil, want an error since the underlying writer doesn't support http.Hijacker")
 	}
+}
+
+// flushErrorWriter implements http.Flusher and the optional FlushError()
+// error method http.ResponseController prefers over it - to verify
+// newTrackingResponseWriter selects a variant that preserves FlushError
+// instead of one that only forwards to plain Flush() and silently
+// discards the error.
+type flushErrorWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w *flushErrorWriter) FlushError() error { return w.err }
+
+func TestResponseControllerPreservesFlushError(t *testing.T) {
+	t.Run("failure", func(t *testing.T) {
+		underlying := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("flush failed")}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		err := http.NewResponseController(wrapped).Flush()
+		if err == nil || err.Error() != "flush failed" {
+			t.Errorf("ResponseController.Flush() error = %v, want the underlying FlushError() error to be preserved, not shadowed by a plain http.Flusher passthrough", err)
+		}
+		if tw.wroteHeader {
+			t.Error("a failed FlushError() must not mark the response committed")
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		underlying := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: nil}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		if err := http.NewResponseController(wrapped).Flush(); err != nil {
+			t.Errorf("ResponseController.Flush() error = %v, want nil", err)
+		}
+		if !tw.wroteHeader {
+			t.Error("a successful FlushError() should mark the response committed, the same way a plain successful Flush() does")
+		}
+	})
+
+	t.Run("plain Flush() still discards the error but still delegates through FlushError", func(t *testing.T) {
+		underlying := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("flush failed")}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		wrapped.(http.Flusher).Flush()
+
+		if tw.wroteHeader {
+			t.Error("Flush() delegating to a failing FlushError() must not mark the response committed, even though http.Flusher's signature can't report the failure to the caller")
+		}
+	})
+
+	t.Run("combined with Hijacker", func(t *testing.T) {
+		hijackable := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		underlying := struct {
+			*flushErrorWriter
+			http.Hijacker
+		}{
+			flushErrorWriter: &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: nil},
+			Hijacker:         hijackable,
+		}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		fe, ok := wrapped.(interface{ FlushError() error })
+		if !ok {
+			t.Fatal("wrapped does not implement FlushError() error, want it to - the underlying writer does")
+		}
+		hj, ok := wrapped.(http.Hijacker)
+		if !ok {
+			t.Fatal("wrapped does not implement http.Hijacker, want it to - the underlying writer does")
+		}
+
+		wrapped.(http.Flusher).Flush()
+		if !tw.wroteHeader {
+			t.Error("Flush() should mark the response committed on a successful underlying FlushError()")
+		}
+
+		if err := fe.FlushError(); err != nil {
+			t.Errorf("FlushError() = %v, want nil", err)
+		}
+
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		if !hijackable.hijacked {
+			t.Error("Hijack() did not delegate to the underlying writer")
+		}
+	})
 }
 
 func TestTrackingResponseWriterInformationalHeaderIsNotCommitment(t *testing.T) {
