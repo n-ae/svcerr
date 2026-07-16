@@ -371,6 +371,17 @@ zerolog, not the core `svcerr` module. `go get github.com/n-ae/svcerr`
 never pulls in zerolog; only `go get github.com/n-ae/svcerr/zerologadapter`
 does, and only for callers who use it.
 
+**Adapter versioning:** the adapter is tagged independently
+(`zerologadapter/vX.Y.Z`) and only when the adapter itself changes - not
+on every root release, so its latest tag lagging the root's is expected,
+not an oversight. Compatibility is carried by the `Logger` interface, not
+by version lockstep: the adapter's `go.mod` requires whatever root version
+was current at its last change, and Go's module resolution picks the
+higher of that and your own requirement, so an older adapter tag works
+fine with newer root releases. The adapter's minimum Go version is also
+dictated by zerolog's dependency chain rather than by this repo, so it can
+sit higher than the root module's own floor.
+
 For any other logger, implement the one-method `Logger` interface directly.
 A `nil` `Logger` is also fine - `WriteHTTPError`/`WriteHTTPErrorHTML`/
 `WriteHTTPProblem`/`RecoveryMiddleware` simply skip logging rather than
