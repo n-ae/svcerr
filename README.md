@@ -264,4 +264,6 @@ myReporter.Report(r.Context(), err, statusCode)
 Extracted from an application's `internal/errors` package once it had no
 callers left depending on app-specific behavior — see the
 [release notes](https://github.com/n-ae/svcerr/releases) for what changed
-along the way.
+along the way. Note: `zerologadapter/v0.4.0` shipped with a `go.mod` that
+made it unfetchable outside this repo; use `zerologadapter/v0.4.1` or
+later instead (the root `svcerr` module's own `v0.4.0` tag is unaffected).
