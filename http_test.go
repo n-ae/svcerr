@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1383,6 +1384,40 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 		if w.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+	})
+
+	t.Run("recovers an abnormal exit that leaves recover() reporting nil", func(t *testing.T) {
+		// recover() reports nil both for a genuinely uneventful request and
+		// for a handler that called panic(nil) under the pre-Go 1.21
+		// panicnil GODEBUG default - which Go selects from the *main*
+		// module's go directive, not this package's, so it isn't under
+		// this test binary's control. runtime.Goexit produces the same
+		// "recover() is nil" observation deterministically, regardless of
+		// GODEBUG state, so it stands in here for both that case and for
+		// panic(nil) itself: RecoveryMiddleware must not mistake either
+		// for normal completion.
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			runtime.Goexit()
+		}))
+
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		}()
+		<-done
+
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].fields["error_code"] != string(ErrCodeInternal) {
+			t.Errorf("error_code field = %v, want %v", logger.calls[0].fields["error_code"], ErrCodeInternal)
 		}
 	})
 

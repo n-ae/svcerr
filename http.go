@@ -893,10 +893,24 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			wrapped, tw := newTrackingResponseWriter(w)
+			returnedNormally := false
 
 			defer func() {
 				rec := recover()
-				if rec == nil {
+
+				// recover() also reports nil when next.ServeHTTP panicked
+				// with a literal nil: whether that's true depends on the
+				// panicnil GODEBUG default, which Go selects from the
+				// *main* module's go directive, not this package's - so a
+				// consumer whose own go.mod predates Go 1.21 gets the old
+				// behavior regardless of what this module declares. It's
+				// also what a bare recover() sees after next.ServeHTTP
+				// calls runtime.Goexit. Neither can be told apart from the
+				// other through recover() alone, but both are abnormal
+				// exits, so returnedNormally - set only after ServeHTTP
+				// actually returns - is what distinguishes them from a
+				// genuinely uneventful request.
+				if rec == nil && returnedNormally {
 					return
 				}
 
@@ -948,6 +962,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 			}()
 
 			next.ServeHTTP(wrapped, r)
+			returnedNormally = true
 		})
 	}
 }
