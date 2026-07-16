@@ -133,6 +133,7 @@ func WriteJSON(w http.ResponseWriter, err error) int {
 func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, renderErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
+	node := outermostCoded(err)
 
 	errResp := HTTPErrorResponse{
 		Error: ErrorDetail{
@@ -162,10 +163,12 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 	// marshal-failure fallback: that response no longer represents err's
 	// own classification.
 	if marshalErr == nil {
-		if rle, ok := outermostCoded(err).(*RateLimitError); ok {
+		if rle, ok := node.(*RateLimitError); ok {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 		}
 	}
+
+	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(body)
@@ -202,6 +205,26 @@ func prepareErrorHeaders(h http.Header, contentType string) {
 	h.Set("X-Content-Type-Options", "nosniff")
 }
 
+// setAuthenticateChallenge sets the WWW-Authenticate header when
+// statusCode is 401 and node (the same outermost coded node used for
+// everything else in err's classification) provides a challenge via
+// Authenticator - RFC 7235 §3.1 requires at least one WWW-Authenticate
+// challenge on every 401 response, but this package has no way to invent
+// an application's authentication scheme or realm on its own, so it's
+// opt-in. Shared by all three response writers (JSON, HTML, problem+json).
+func setAuthenticateChallenge(h http.Header, statusCode int, node coderError) {
+	if statusCode != http.StatusUnauthorized {
+		return
+	}
+	a, ok := node.(Authenticator)
+	if !ok {
+		return
+	}
+	if challenge, set := a.AuthenticateChallenge(); set {
+		h.Set("WWW-Authenticate", challenge)
+	}
+}
+
 // fallbackErrorBody returns the always-encodable JSON body writeJSONErrorBody
 // substitutes when the real response failed to marshal - built from
 // defaultMessageForCode's plain per-code string, never from err or any
@@ -234,6 +257,7 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error) int {
 	message := getUserFriendlyMessage(code, err)
 
 	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8")
+	setAuthenticateChallenge(w.Header(), statusCode, outermostCoded(err))
 	w.WriteHeader(statusCode)
 
 	body := `<div class="error-message" role="alert">` +
@@ -353,6 +377,8 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, ren
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 		}
 	}
+
+	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(body)

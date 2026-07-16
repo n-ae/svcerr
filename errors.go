@@ -19,10 +19,11 @@
 //
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
-// SetProblemTitle, and RecaptureStackTrace all mutate the receiver in
-// place with no locking, and the exported struct fields on ValidationError,
-// DatabaseError, and the other semantic types are plain fields, not
-// synchronized accessors. This is fine for the normal pattern of
+// SetProblemTitle, SetAuthenticateChallenge, and RecaptureStackTrace all
+// mutate the receiver in place with no locking, and the exported struct
+// fields on ValidationError, DatabaseError, and the other semantic types
+// are plain fields, not synchronized accessors. This is fine for the
+// normal pattern of
 // constructing and configuring an error locally before returning it, but
 // don't call these once an error might be read or mutated from another
 // goroutine (e.g. after handing it to a shared error-collection type).
@@ -137,6 +138,17 @@ type ProblemTitler interface {
 	ProblemTitle() (string, bool)
 }
 
+// Authenticator is implemented by any error that specifies its own
+// WWW-Authenticate challenge for a 401 response. RFC 7235 §3.1 requires a
+// server generating a 401 to include at least one WWW-Authenticate
+// challenge; this package has no way to know an application's
+// authentication scheme or realm on its own, so none of the response
+// writers set one unless the error provides it. BaseError implements it
+// via SetAuthenticateChallenge/AuthenticateChallenge.
+type Authenticator interface {
+	AuthenticateChallenge() (string, bool)
+}
+
 // ErrorWithCode is the full capability set every type in this package
 // implements via BaseError: Coder and StackTracer, plus error and Unwrap.
 // Prefer the narrower Coder, StackTracer, or PublicMessager when writing a
@@ -169,6 +181,7 @@ type BaseError struct {
 	problemType           string
 	problemInstance       string
 	problemTitle          string
+	authenticateChallenge string
 }
 
 // Code returns the error code
@@ -310,6 +323,21 @@ func (e *BaseError) ProblemTitle() (string, bool) {
 	return e.problemTitle, e.problemTitle != ""
 }
 
+// SetAuthenticateChallenge sets the WWW-Authenticate header
+// WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem send alongside a 401
+// response - e.g. `Bearer realm="api"`. Only applied when the error's
+// code maps to 401; set on an error whose code maps elsewhere and it's
+// silently unused.
+func (e *BaseError) SetAuthenticateChallenge(challenge string) {
+	e.authenticateChallenge = challenge
+}
+
+// AuthenticateChallenge returns the challenge set by
+// SetAuthenticateChallenge, and whether one was set at all.
+func (e *BaseError) AuthenticateChallenge() (string, bool) {
+	return e.authenticateChallenge, e.authenticateChallenge != ""
+}
+
 // ownMessage returns e.message alone, never a wrapped cause's text -
 // unlike Error(), which appends the cause when one is set. Every
 // constructor in this package (New, Wrap, and every semantic New*/Wrap*
@@ -331,6 +359,7 @@ var (
 	_ ProblemTyper     = (*BaseError)(nil)
 	_ ProblemInstancer = (*BaseError)(nil)
 	_ ProblemTitler    = (*BaseError)(nil)
+	_ Authenticator    = (*BaseError)(nil)
 	_ ErrorWithCode    = (*BaseError)(nil)
 )
 
@@ -619,6 +648,36 @@ func NewAuthenticationError(reason, message string) *AuthenticationError {
 	}
 }
 
+// WrapAuthenticationError wraps an existing error as an authentication
+// error. ErrCodeUnauthorized/ErrCodeTokenExpired/ErrCodeTokenInvalid/
+// ErrCodePermissionDenied are all in mayExposeOwnMessage's safe category,
+// so message is shown to the client the same as NewAuthenticationError's -
+// it's still an explicit caller argument, never derived from err.
+func WrapAuthenticationError(err error, reason, message string) *AuthenticationError {
+	code := ErrCodeUnauthorized
+	switch reason {
+	case "token_expired":
+		code = ErrCodeTokenExpired
+	case "token_invalid":
+		code = ErrCodeTokenInvalid
+	case "permission_denied":
+		code = ErrCodePermissionDenied
+	}
+
+	return &AuthenticationError{
+		BaseError: BaseError{
+			code:    code,
+			message: message,
+			cause:   err,
+			pcs:     captureStackTrace(2),
+			context: map[string]interface{}{
+				"reason": reason,
+			},
+		},
+		Reason: reason,
+	}
+}
+
 // NotFoundError represents resource not found errors
 type NotFoundError struct {
 	BaseError
@@ -632,6 +691,28 @@ func NewNotFoundError(resourceType, resourceID string) *NotFoundError {
 		BaseError: BaseError{
 			code:    ErrCodeNotFound,
 			message: fmt.Sprintf("%s not found: %s", resourceType, resourceID),
+			pcs:     captureStackTrace(2),
+			context: map[string]interface{}{
+				"resource_type": resourceType,
+				"resource_id":   resourceID,
+			},
+		},
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+	}
+}
+
+// WrapNotFoundError wraps an existing error (e.g. sql.ErrNoRows) as a not
+// found error, preserving it in the chain for errors.Is/errors.As while
+// still getting NotFoundError's type, automatic resource_type/resource_id
+// details, and client-facing message - which is generated the same way
+// NewNotFoundError's is, never derived from err's own text.
+func WrapNotFoundError(err error, resourceType, resourceID string) *NotFoundError {
+	return &NotFoundError{
+		BaseError: BaseError{
+			code:    ErrCodeNotFound,
+			message: fmt.Sprintf("%s not found: %s", resourceType, resourceID),
+			cause:   err,
 			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"resource_type": resourceType,
@@ -667,6 +748,27 @@ func NewConflictError(resourceType, conflictKey, message string) *ConflictError 
 	}
 }
 
+// WrapConflictError wraps an existing error as a conflict error.
+// ErrCodeAlreadyExists is in mayExposeOwnMessage's safe category, so
+// message is shown to the client the same as NewConflictError's - it's
+// still an explicit caller argument, never derived from err.
+func WrapConflictError(err error, resourceType, conflictKey, message string) *ConflictError {
+	return &ConflictError{
+		BaseError: BaseError{
+			code:    ErrCodeAlreadyExists,
+			message: message,
+			cause:   err,
+			pcs:     captureStackTrace(2),
+			context: map[string]interface{}{
+				"resource_type": resourceType,
+				"conflict_key":  conflictKey,
+			},
+		},
+		ResourceType: resourceType,
+		ConflictKey:  conflictKey,
+	}
+}
+
 // RateLimitError represents rate limiting errors
 type RateLimitError struct {
 	BaseError
@@ -681,6 +783,29 @@ func NewRateLimitError(service string, limit, retryAfter int) *RateLimitError {
 		BaseError: BaseError{
 			code:    ErrCodeRateLimitExceeded,
 			message: fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
+			pcs:     captureStackTrace(2),
+			context: map[string]interface{}{
+				"service":     service,
+				"limit":       limit,
+				"retry_after": retryAfter,
+			},
+		},
+		Service:    service,
+		Limit:      limit,
+		RetryAfter: retryAfter,
+	}
+}
+
+// WrapRateLimitError wraps an existing error as a rate limit error.
+// ErrCodeRateLimitExceeded is in mayExposeOwnMessage's safe category, so
+// message is generated the same way NewRateLimitError's is, never derived
+// from err's own text.
+func WrapRateLimitError(err error, service string, limit, retryAfter int) *RateLimitError {
+	return &RateLimitError{
+		BaseError: BaseError{
+			code:    ErrCodeRateLimitExceeded,
+			message: fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
+			cause:   err,
 			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"service":     service,

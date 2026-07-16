@@ -203,6 +203,10 @@ type ProblemInstancer interface {
 type ProblemTitler interface {
 	ProblemTitle() (string, bool) // WriteHTTPProblem's "title", instead of http.StatusText(status)
 }
+
+type Authenticator interface {
+	AuthenticateChallenge() (string, bool) // WWW-Authenticate on a 401 response
+}
 ```
 
 A minimal type implementing `Coder` (and `error`) is enough to get correct
@@ -271,6 +275,24 @@ err.RemovePublicDetail("resource_id")     // removes it from details...
 err.SetPublicMessage("user was not found") // ...and this removes it from message
 ```
 
+### Authentication challenges
+
+[RFC 7235 §3.1](https://www.rfc-editor.org/rfc/rfc7235#section-3.1)
+requires a server generating a 401 response to include at least one
+`WWW-Authenticate` challenge. This package has no way to know an
+application's authentication scheme or realm on its own, so none of the
+response writers set one unless the error provides it via
+`SetAuthenticateChallenge`:
+
+```go
+err := svcerr.NewAuthenticationError("token_invalid", "invalid authentication token")
+err.SetAuthenticateChallenge(`Bearer realm="api"`)
+svcerr.WriteHTTPError(w, err, logger) // now sends WWW-Authenticate too
+```
+
+Only applied when the response status is 401 - set on an error whose code
+maps elsewhere and it's silently unused.
+
 ### Wrapping constructors in your own helper
 
 Every `New*`/`Wrap*` constructor assumes it's called directly from the site
@@ -294,10 +316,11 @@ func validateTeamID(id string) error {
 
 Errors aren't safe for concurrent mutation. `SetPublicMessage`,
 `SetPublicDetail`, `RemovePublicDetail`, `SetProblemType`,
-`SetProblemInstance`, `SetProblemTitle`, and `RecaptureStackTrace` all
-mutate the receiver in place with no locking. That's fine for the normal pattern - construct an
-error, configure it, return it - but don't call these once an error might
-be read or mutated from another goroutine.
+`SetProblemInstance`, `SetProblemTitle`, `SetAuthenticateChallenge`, and
+`RecaptureStackTrace` all mutate the receiver in place with no locking.
+That's fine for the normal pattern - construct an error, configure it,
+return it - but don't call these once an error might be read or mutated
+from another goroutine.
 
 ### Logging
 

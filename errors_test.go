@@ -247,6 +247,42 @@ func TestAuthenticationError(t *testing.T) {
 	}
 }
 
+func TestWrapAuthenticationError(t *testing.T) {
+	tests := []struct {
+		reason   string
+		wantCode ErrorCode
+	}{
+		{"token_expired", ErrCodeTokenExpired},
+		{"token_invalid", ErrCodeTokenInvalid},
+		{"permission_denied", ErrCodePermissionDenied},
+		{"other", ErrCodeUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			originalErr := errors.New("jwt: signature invalid")
+			wrappedErr := WrapAuthenticationError(originalErr, tt.reason, "invalid authentication token")
+
+			if wrappedErr.Code() != tt.wantCode {
+				t.Errorf("Code() = %v, want %v", wrappedErr.Code(), tt.wantCode)
+			}
+			if wrappedErr.Reason != tt.reason {
+				t.Errorf("Reason = %v, want %v", wrappedErr.Reason, tt.reason)
+			}
+			if !errors.Is(wrappedErr, originalErr) {
+				t.Error("errors.Is() failed, wrapping not working")
+			}
+
+			// These codes are all a mayExposeOwnMessage category - the
+			// explicit message argument is shown to the client despite
+			// wrapping a cause, the same as NewAuthenticationError's.
+			if got, want := UserMessage(wrappedErr), "invalid authentication token"; got != want {
+				t.Errorf("UserMessage() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestNotFoundError(t *testing.T) {
 	err := NewNotFoundError("league", "12345")
 
@@ -268,6 +304,31 @@ func TestNotFoundError(t *testing.T) {
 	}
 }
 
+func TestWrapNotFoundError(t *testing.T) {
+	originalErr := errors.New("sql: no rows in result set")
+	wrappedErr := WrapNotFoundError(originalErr, "user", "42")
+
+	if wrappedErr.Code() != ErrCodeNotFound {
+		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeNotFound)
+	}
+	if wrappedErr.ResourceType != "user" {
+		t.Errorf("ResourceType = %v, want user", wrappedErr.ResourceType)
+	}
+	if wrappedErr.ResourceID != "42" {
+		t.Errorf("ResourceID = %v, want 42", wrappedErr.ResourceID)
+	}
+	if !errors.Is(wrappedErr, originalErr) {
+		t.Error("errors.Is() failed, wrapping not working")
+	}
+
+	// ErrCodeNotFound is a mayExposeOwnMessage category - the generated
+	// message is shown to the client despite wrapping a cause, the same
+	// as NewNotFoundError's, and never includes the wrapped cause's text.
+	if got, want := UserMessage(wrappedErr), "user not found: 42"; got != want {
+		t.Errorf("UserMessage() = %q, want %q", got, want)
+	}
+}
+
 func TestConflictError(t *testing.T) {
 	err := NewConflictError("team", "team_key", "team already exists")
 
@@ -281,6 +342,27 @@ func TestConflictError(t *testing.T) {
 
 	if err.ConflictKey != "team_key" {
 		t.Errorf("ConflictKey = %v, want team_key", err.ConflictKey)
+	}
+}
+
+func TestWrapConflictError(t *testing.T) {
+	originalErr := errors.New("unique constraint violation")
+	wrappedErr := WrapConflictError(originalErr, "team", "team_key", "team already exists")
+
+	if wrappedErr.Code() != ErrCodeAlreadyExists {
+		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeAlreadyExists)
+	}
+	if wrappedErr.ResourceType != "team" {
+		t.Errorf("ResourceType = %v, want team", wrappedErr.ResourceType)
+	}
+	if wrappedErr.ConflictKey != "team_key" {
+		t.Errorf("ConflictKey = %v, want team_key", wrappedErr.ConflictKey)
+	}
+	if !errors.Is(wrappedErr, originalErr) {
+		t.Error("errors.Is() failed, wrapping not working")
+	}
+	if got, want := UserMessage(wrappedErr), "team already exists"; got != want {
+		t.Errorf("UserMessage() = %q, want %q", got, want)
 	}
 }
 
@@ -301,6 +383,30 @@ func TestRateLimitError(t *testing.T) {
 
 	if err.RetryAfter != 60 {
 		t.Errorf("RetryAfter = %v, want 60", err.RetryAfter)
+	}
+}
+
+func TestWrapRateLimitError(t *testing.T) {
+	originalErr := errors.New("redis: connection refused")
+	wrappedErr := WrapRateLimitError(originalErr, "yahoo", 300, 60)
+
+	if wrappedErr.Code() != ErrCodeRateLimitExceeded {
+		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeRateLimitExceeded)
+	}
+	if wrappedErr.Service != "yahoo" {
+		t.Errorf("Service = %v, want yahoo", wrappedErr.Service)
+	}
+	if wrappedErr.Limit != 300 {
+		t.Errorf("Limit = %v, want 300", wrappedErr.Limit)
+	}
+	if wrappedErr.RetryAfter != 60 {
+		t.Errorf("RetryAfter = %v, want 60", wrappedErr.RetryAfter)
+	}
+	if !errors.Is(wrappedErr, originalErr) {
+		t.Error("errors.Is() failed, wrapping not working")
+	}
+	if got, want := UserMessage(wrappedErr), "rate limit exceeded for yahoo: 300 requests"; got != want {
+		t.Errorf("UserMessage() = %q, want %q", got, want)
 	}
 }
 

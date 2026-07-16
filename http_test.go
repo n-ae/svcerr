@@ -581,6 +581,67 @@ func TestWriteHTTPErrorHTMLEscapesMessage(t *testing.T) {
 	}
 }
 
+func TestWWWAuthenticateHeader(t *testing.T) {
+	writers := map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	}
+
+	for name, write := range writers {
+		t.Run(name+"/challenge set", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			err := NewAuthenticationError("token_invalid", "invalid authentication token")
+			err.SetAuthenticateChallenge(`Bearer realm="api"`)
+
+			write(w, err, nil)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="api"` {
+				t.Errorf(`WWW-Authenticate = %q, want the SetAuthenticateChallenge value`, got)
+			}
+		})
+
+		t.Run(name+"/no challenge set", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			write(w, NewAuthenticationError("token_invalid", "invalid authentication token"), nil)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want empty (this package can't invent an application's auth scheme unless SetAuthenticateChallenge is called)", got)
+			}
+		})
+
+		t.Run(name+"/challenge set but status isn't 401", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			err := NewNotFoundError("league", "1")
+			err.SetAuthenticateChallenge(`Bearer realm="api"`) // misuse: irrelevant code
+
+			write(w, err, nil)
+
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want empty (only applied to a 401 response)", got)
+			}
+		})
+
+		t.Run(name+"/401 via a non-BaseError Coder that isn't an Authenticator", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			write(w, &minimalCodedUnwrappableError{code: ErrCodeUnauthorized, msg: "unauthorized"}, nil)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want empty (a Coder that doesn't implement Authenticator can't provide one)", got)
+			}
+		})
+	}
+}
+
 func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {
 	// A handler that set headers for a would-be successful response (a
 	// precomputed Content-Length, a Trailer announcement) before panicking
