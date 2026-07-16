@@ -623,21 +623,30 @@ type AuthenticationError struct {
 	Reason    string // "token_expired", "token_invalid", "permission_denied"
 }
 
-// NewAuthenticationError creates a new authentication error
-func NewAuthenticationError(reason, message string) *AuthenticationError {
-	code := ErrCodeUnauthorized
+// authenticationErrorCode maps an AuthenticationError's Reason to its
+// ErrorCode - ErrCodeTokenExpired/ErrCodeTokenInvalid/
+// ErrCodePermissionDenied for those three specific reasons, and
+// ErrCodeUnauthorized for everything else. Mirrors databaseErrorCode's
+// role for DatabaseError, and exists for the same reason: a New*/Wrap*
+// pair sharing mapping logic shouldn't each carry its own copy of it.
+func authenticationErrorCode(reason string) ErrorCode {
 	switch reason {
 	case "token_expired":
-		code = ErrCodeTokenExpired
+		return ErrCodeTokenExpired
 	case "token_invalid":
-		code = ErrCodeTokenInvalid
+		return ErrCodeTokenInvalid
 	case "permission_denied":
-		code = ErrCodePermissionDenied
+		return ErrCodePermissionDenied
+	default:
+		return ErrCodeUnauthorized
 	}
+}
 
+// NewAuthenticationError creates a new authentication error
+func NewAuthenticationError(reason, message string) *AuthenticationError {
 	return &AuthenticationError{
 		BaseError: BaseError{
-			code:    code,
+			code:    authenticationErrorCode(reason),
 			message: message,
 			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
@@ -654,19 +663,9 @@ func NewAuthenticationError(reason, message string) *AuthenticationError {
 // so message is shown to the client the same as NewAuthenticationError's -
 // it's still an explicit caller argument, never derived from err.
 func WrapAuthenticationError(err error, reason, message string) *AuthenticationError {
-	code := ErrCodeUnauthorized
-	switch reason {
-	case "token_expired":
-		code = ErrCodeTokenExpired
-	case "token_invalid":
-		code = ErrCodeTokenInvalid
-	case "permission_denied":
-		code = ErrCodePermissionDenied
-	}
-
 	return &AuthenticationError{
 		BaseError: BaseError{
-			code:    code,
+			code:    authenticationErrorCode(reason),
 			message: message,
 			cause:   err,
 			pcs:     captureStackTrace(2),

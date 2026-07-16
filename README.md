@@ -134,6 +134,16 @@ still work for handlers wrapped by the middleware, and a handler's own
 always claiming both regardless of what's underneath. A successful hijack
 is itself treated as committing the response.
 
+Flushing, hijacking, and the error-reporting `FlushError() error` form
+(which `http.ResponseController` prefers) are the *only* optional
+interfaces the wrapper preserves - `http.Pusher` and `io.ReaderFrom` in
+particular are dropped, so HTTP/2 server push and `sendfile`-style copy
+optimizations aren't available to handlers behind the middleware. One
+deliberate asymmetry: an underlying writer implementing only
+`FlushError() error` (not plain `Flush()`) gains a `Flush()` method
+through the wrapper, since the flush capability genuinely exists and
+`http.Flusher` is how handlers conventionally probe for it.
+
 ### Error types
 
 `ValidationError`, `DatabaseError`, `ExternalAPIError`, `AuthenticationError`,
@@ -169,6 +179,18 @@ func init() {
 deployment that wants different semantics than the default. It rejects any
 status outside 400-599, since this package only ever maps error codes to
 error responses.
+
+Note that a custom code registers a *status*, not a message policy: it's
+not in the built-in safe-category list (see "Public vs. internal messages"
+below), so its response message falls back to the generic "An unexpected
+error occurred." rather than the message passed to `New`/`Wrap`. That's
+deliberate - this package can't know whether an unfamiliar code's messages
+are client-safe - so pair custom codes with `SetPublicMessage`:
+
+```go
+err := svcerr.New(ErrCodeOutOfStock, "sku WIDGET-42 depleted, restock ETA unknown")
+err.SetPublicMessage("This item is out of stock.")
+```
 
 ### Custom error types
 

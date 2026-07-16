@@ -849,13 +849,21 @@ func (w *flushErrorHijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 
 // newTrackingResponseWriter wraps w for RecoveryMiddleware's commit
 // tracking. It returns the http.ResponseWriter to pass to the handler -
-// implementing http.Flusher and/or http.Hijacker if and only if w itself
-// does, and FlushError() error too when w implements that (checked ahead
-// of plain http.Flusher, matching http.ResponseController's own
-// priority - see flushErrorer) - and the *trackingResponseWriter base to
-// read wroteHeader/status from afterward regardless of which variant was
-// returned (every variant embeds it by pointer, so its state is shared
-// either way).
+// implementing http.Hijacker if and only if w itself does, and
+// http.Flusher if and only if w can flush at all: plain Flush(),
+// FlushError() error, or both (FlushError is checked ahead of plain
+// Flusher, matching http.ResponseController's own priority - see
+// flushErrorer). One deliberate asymmetry follows: a writer implementing
+// only FlushError() gains a plain Flush() method it didn't have, because
+// the flush capability genuinely exists underneath and http.Flusher is
+// how handlers conventionally probe for it - an adapter over a real
+// capability, not a fabricated one (the FlushError method itself is also
+// preserved, so no error information is lost). Nothing else is
+// preserved: http.Pusher and io.ReaderFrom in particular are dropped by
+// the wrapper. The second return value is the *trackingResponseWriter
+// base, for reading wroteHeader/status afterward regardless of which
+// variant was returned (every variant embeds it by pointer, so its state
+// is shared either way).
 func newTrackingResponseWriter(w http.ResponseWriter) (http.ResponseWriter, *trackingResponseWriter) {
 	base := &trackingResponseWriter{ResponseWriter: w}
 	hijacker, hijackable := w.(http.Hijacker)

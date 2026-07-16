@@ -1100,6 +1100,52 @@ type flushErrorWriter struct {
 
 func (w *flushErrorWriter) FlushError() error { return w.err }
 
+// flushErrorOnlyWriter implements http.ResponseWriter and FlushError()
+// error but deliberately NOT plain Flush() - legal, since
+// http.ResponseController documents the two as alternatives.
+type flushErrorOnlyWriter struct {
+	rec      *httptest.ResponseRecorder
+	flushErr error
+	flushed  bool
+}
+
+func (w *flushErrorOnlyWriter) Header() http.Header         { return w.rec.Header() }
+func (w *flushErrorOnlyWriter) Write(b []byte) (int, error) { return w.rec.Write(b) }
+func (w *flushErrorOnlyWriter) WriteHeader(code int)        { w.rec.WriteHeader(code) }
+func (w *flushErrorOnlyWriter) FlushError() error {
+	w.flushed = true
+	return w.flushErr
+}
+
+func TestFlushErrorOnlyWriterGainsFlusherDeliberately(t *testing.T) {
+	// Documented asymmetry (see newTrackingResponseWriter): a writer with
+	// only FlushError() gains a plain Flush() method through the wrapper,
+	// because the flush capability genuinely exists underneath and
+	// http.Flusher is how handlers conventionally probe for it. This test
+	// pins that as deliberate - if strict capability-matching is ever
+	// wanted instead, this is the behavior being traded away.
+	underlying := &flushErrorOnlyWriter{rec: httptest.NewRecorder()}
+	wrapped, tw := newTrackingResponseWriter(underlying)
+
+	f, ok := wrapped.(http.Flusher)
+	if !ok {
+		t.Fatal("wrapped does not implement http.Flusher, want it to (deliberate adapter over the underlying FlushError capability)")
+	}
+
+	f.Flush()
+	if !underlying.flushed {
+		t.Error("Flush() did not delegate to the underlying FlushError()")
+	}
+	if !tw.wroteHeader {
+		t.Error("a successful flush through the adapter should mark the response committed")
+	}
+
+	// The richer form is preserved too - no error information is lost.
+	if _, ok := wrapped.(interface{ FlushError() error }); !ok {
+		t.Error("wrapped does not implement FlushError() error, want it preserved alongside the Flush() adapter")
+	}
+}
+
 func TestResponseControllerPreservesFlushError(t *testing.T) {
 	t.Run("failure", func(t *testing.T) {
 		underlying := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("flush failed")}
