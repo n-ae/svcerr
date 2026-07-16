@@ -12,9 +12,10 @@
 // This package's own code imports no logging library: WriteHTTPError,
 // WriteHTTPErrorHTML, and RecoveryMiddleware log through the Logger
 // interface instead - pass an adapter for whatever logger the caller uses.
-// (The zerologadapter subpackage, which does depend on zerolog, is optional
-// and lives in this same module; importing it is what pulls zerolog into a
-// caller's build, not this package.)
+// (The zerologadapter subpackage, which does depend on zerolog, is a
+// separate Go module nested in this repo; only importing it pulls zerolog
+// into a caller's build, not this package - this module has zero
+// dependencies of its own.)
 package svcerr
 
 import (

@@ -138,12 +138,16 @@ set, register its HTTP status once, at startup:
 const ErrCodeOutOfStock svcerr.ErrorCode = "OUT_OF_STOCK"
 
 func init() {
-	svcerr.RegisterStatusCode(ErrCodeOutOfStock, http.StatusConflict)
+	if err := svcerr.RegisterStatusCode(ErrCodeOutOfStock, http.StatusConflict); err != nil {
+		panic(err) // a bad registration at startup should fail loudly, not later inside an error handler
+	}
 }
 ```
 
 `RegisterStatusCode` can also override a built-in code's mapping, for a
-deployment that wants different semantics than the default.
+deployment that wants different semantics than the default. It rejects any
+status outside 400-599, since this package only ever maps error codes to
+error responses.
 
 ### Custom error types
 

@@ -650,6 +650,38 @@ func TestMayExposeOwnMessageIsCategoryBased(t *testing.T) {
 	}
 }
 
+// minimalCoderWrapper implements only Coder, error, and Unwrap - not
+// PublicMessager - to verify getUserFriendlyMessage resolves
+// SetPublicMessage from the same outermost coded node the code came from,
+// not from anywhere in the chain.
+type minimalCoderWrapper struct {
+	err error
+}
+
+func (e *minimalCoderWrapper) Error() string   { return "internal failure" }
+func (e *minimalCoderWrapper) Unwrap() error   { return e.err }
+func (e *minimalCoderWrapper) Code() ErrorCode { return ErrCodeInternal }
+
+func TestPublicMessageDoesNotCrossOuterClassification(t *testing.T) {
+	inner := NewNotFoundError("user", "secret@example.com")
+	inner.SetPublicMessage("account secret@example.com was not found")
+
+	outer := &minimalCoderWrapper{err: inner}
+
+	if got, want := GetErrorCode(outer), ErrCodeInternal; got != want {
+		t.Fatalf("GetErrorCode() = %v, want %v", got, want)
+	}
+
+	// outer doesn't implement PublicMessager, and ErrCodeInternal isn't in
+	// the mayExposeOwnMessage category, so this must fall back to the
+	// generic default - never the inner NotFoundError's override, which
+	// belongs to a different classification (NOT_FOUND) than the one this
+	// response is actually reporting (INTERNAL_ERROR).
+	if got, want := UserMessage(outer), defaultMessageForCode(ErrCodeInternal); got != want {
+		t.Errorf("UserMessage() = %q, want the generic default %q (inner SetPublicMessage override must not leak through outer's different classification)", got, want)
+	}
+}
+
 func TestRecaptureStackTrace(t *testing.T) {
 	// newViaHelper mimics a caller wrapping a constructor in their own
 	// helper function - without RecaptureStackTrace, the trace's top

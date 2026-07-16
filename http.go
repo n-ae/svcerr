@@ -33,10 +33,20 @@ var (
 // application's own ErrorCode values (constructed via New/Wrap), or to
 // override a built-in mapping for a deployment that wants different
 // semantics. Safe for concurrent use.
-func RegisterStatusCode(code ErrorCode, status int) {
+//
+// status must be a valid error status (400-599, since this package only
+// ever maps error codes to error responses) - an out-of-range value (0,
+// 200, 999, ...) is rejected here rather than surfacing later as a
+// WriteHeader panic from inside an error handler, which is a far harder
+// place to diagnose it.
+func RegisterStatusCode(code ErrorCode, status int) error {
+	if status < 400 || status > 599 {
+		return fmt.Errorf("svcerr: status must be 400-599, got %d", status)
+	}
 	customStatusMu.Lock()
 	defer customStatusMu.Unlock()
 	customStatusCode[code] = status
+	return nil
 }
 
 // HTTPStatusCode maps error codes to HTTP status codes
@@ -287,32 +297,43 @@ func mayExposeOwnMessage(code ErrorCode) bool {
 
 // getUserFriendlyMessage returns a user-friendly error message
 func getUserFriendlyMessage(code ErrorCode, err error) string {
-	if err != nil {
-		// An explicit SetPublicMessage override always wins.
-		var pm PublicMessager
-		if errors.As(err, &pm) {
-			if msg, ok := pm.PublicMessage(); ok {
-				return msg
-			}
-		}
+	if err == nil {
+		return defaultMessageForCode(code)
+	}
 
-		// Only the outermost coded node's own message - never Error(),
-		// which would append a wrapped cause's text - and only for
-		// categories mayExposeOwnMessage trusts by default.
-		if mayExposeOwnMessage(code) {
-			node := outermostCoded(err)
-			if m, ok := node.(ownMessager); ok {
-				return m.ownMessage()
-			}
-			// node doesn't implement ownMessage (e.g. an external Coder
-			// type that doesn't embed BaseError) - fall back to the same
-			// safety rule ownMessage replaces for this package's own
-			// types: Error() is only trusted when the node doesn't wrap a
-			// further cause, since without an ownMessage accessor there's
-			// no way to know its Error() text excludes the cause.
-			if u, ok := node.(interface{ Unwrap() error }); ok && u.Unwrap() == nil {
-				return node.Error()
-			}
+	// Both the public-message override and the own-message fallback below
+	// come from the same outermost coded node the code itself came from -
+	// otherwise a custom Coder-only wrapper (one that doesn't implement
+	// PublicMessager) around an error with SetPublicMessage set would let
+	// errors.As find that inner override and pair it with the outer
+	// wrapper's own, different code.
+	node := outermostCoded(err)
+	if node == nil {
+		return defaultMessageForCode(code)
+	}
+
+	// An explicit SetPublicMessage override always wins.
+	if pm, ok := node.(PublicMessager); ok {
+		if msg, ok := pm.PublicMessage(); ok {
+			return msg
+		}
+	}
+
+	// Only the outermost coded node's own message - never Error(),
+	// which would append a wrapped cause's text - and only for
+	// categories mayExposeOwnMessage trusts by default.
+	if mayExposeOwnMessage(code) {
+		if m, ok := node.(ownMessager); ok {
+			return m.ownMessage()
+		}
+		// node doesn't implement ownMessage (e.g. an external Coder
+		// type that doesn't embed BaseError) - fall back to the same
+		// safety rule ownMessage replaces for this package's own
+		// types: Error() is only trusted when the node doesn't wrap a
+		// further cause, since without an ownMessage accessor there's
+		// no way to know its Error() text excludes the cause.
+		if u, ok := node.(interface{ Unwrap() error }); ok && u.Unwrap() == nil {
+			return node.Error()
 		}
 	}
 
@@ -487,10 +508,24 @@ type trackingResponseWriter struct {
 }
 
 func (w *trackingResponseWriter) WriteHeader(status int) {
-	if !w.wroteHeader {
-		w.wroteHeader = true
-		w.status = status
+	// Informational (1xx) responses aren't the final response - net/http
+	// allows any number of them before the one commit-worthy final
+	// status ("unlike other response headers, informational headers may
+	// be written multiple times"), so they must not mark the tracked
+	// response committed; a handler that sends one and then panics still
+	// needs RecoveryMiddleware to write the real error response. 101
+	// Switching Protocols is the exception: it's a protocol transition,
+	// not an informational preamble, and no further HTTP response
+	// follows on the connection.
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(status)
+		return
 	}
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 
@@ -505,19 +540,28 @@ func (w *trackingResponseWriter) Write(b []byte) (int, error) {
 // Flush implements http.Flusher by delegating to the wrapped
 // ResponseWriter when it supports flushing (e.g. for SSE handlers), and is
 // a no-op otherwise - http.Flusher's signature has no way to report "not
-// supported". A flush commits the response (implicitly as 200 OK if no
-// status was written yet) the same way Write does, so it's recorded the
-// same way - otherwise RecoveryMiddleware could still believe the response
-// is uncommitted after a flush and write a second, corrupting body on top
-// of it if the handler subsequently panics.
+// supported". A successful flush commits the response (implicitly as 200
+// OK if no status was written yet) the same way Write does, so it's
+// recorded the same way - otherwise RecoveryMiddleware could still believe
+// the response is uncommitted after a flush and write a second,
+// corrupting body on top of it if the handler subsequently panics. The
+// commit is only recorded when the underlying writer actually supports
+// Flusher: this wrapper structurally implements http.Flusher regardless
+// (Go's http.Flusher has no way to report "unsupported" from a type
+// assertion), so treating every call as a real flush would let a handler
+// on a non-flushing underlying writer mark the response committed while
+// nothing was ever actually written - silently swallowing a later panic's
+// error response instead of just failing to flush early.
 func (w *trackingResponseWriter) Flush() {
+	f, ok := w.ResponseWriter.(http.Flusher)
+	if !ok {
+		return
+	}
 	if !w.wroteHeader {
 		w.wroteHeader = true
 		w.status = http.StatusOK
 	}
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	f.Flush()
 }
 
 // Unwrap exposes the wrapped ResponseWriter to http.ResponseController,

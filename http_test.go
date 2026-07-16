@@ -62,15 +62,39 @@ func TestRegisterStatusCode(t *testing.T) {
 		t.Fatalf("HTTPStatusCode(%q) before registering = %d, want the default %d", custom, got, http.StatusInternalServerError)
 	}
 
-	RegisterStatusCode(custom, http.StatusTeapot)
+	if err := RegisterStatusCode(custom, http.StatusTeapot); err != nil {
+		t.Fatalf("RegisterStatusCode(%q, %d) error = %v", custom, http.StatusTeapot, err)
+	}
 	if got := HTTPStatusCode(custom); got != http.StatusTeapot {
 		t.Errorf("HTTPStatusCode(%q) after registering = %d, want %d", custom, got, http.StatusTeapot)
 	}
 
 	// Registering a built-in code overrides it too.
-	RegisterStatusCode(ErrCodeNotFound, http.StatusTeapot)
+	if err := RegisterStatusCode(ErrCodeNotFound, http.StatusTeapot); err != nil {
+		t.Fatalf("RegisterStatusCode(ErrCodeNotFound, %d) error = %v", http.StatusTeapot, err)
+	}
 	if got := HTTPStatusCode(ErrCodeNotFound); got != http.StatusTeapot {
 		t.Errorf("HTTPStatusCode(ErrCodeNotFound) after override = %d, want %d", got, http.StatusTeapot)
+	}
+}
+
+func TestRegisterStatusCodeRejectsInvalidStatus(t *testing.T) {
+	const custom ErrorCode = "MY_APP_INVALID_STATUS_CODE"
+	t.Cleanup(func() {
+		customStatusMu.Lock()
+		delete(customStatusCode, custom)
+		customStatusMu.Unlock()
+	})
+
+	for _, status := range []int{0, 200, 399, 600, 999} {
+		if err := RegisterStatusCode(custom, status); err == nil {
+			t.Errorf("RegisterStatusCode(%q, %d) error = nil, want an error (not a valid 400-599 error status)", custom, status)
+		}
+	}
+
+	// A rejected registration must not have taken effect.
+	if got := HTTPStatusCode(custom); got != http.StatusInternalServerError {
+		t.Errorf("HTTPStatusCode(%q) = %d, want the default %d (no rejected registration should apply)", custom, got, http.StatusInternalServerError)
 	}
 }
 
@@ -697,6 +721,76 @@ func TestTrackingResponseWriterFlush(t *testing.T) {
 	}
 }
 
+// nonFlushingWriter implements only http.ResponseWriter - deliberately not
+// http.Flusher - to verify trackingResponseWriter.Flush() doesn't mark the
+// response committed when the underlying writer can't actually flush.
+type nonFlushingWriter struct {
+	rec *httptest.ResponseRecorder
+}
+
+func (w *nonFlushingWriter) Header() http.Header         { return w.rec.Header() }
+func (w *nonFlushingWriter) Write(b []byte) (int, error) { return w.rec.Write(b) }
+func (w *nonFlushingWriter) WriteHeader(statusCode int)  { w.rec.WriteHeader(statusCode) }
+
+func TestTrackingResponseWriterFlushOnUnsupportedUnderlyingWriter(t *testing.T) {
+	underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+	tw := &trackingResponseWriter{ResponseWriter: underlying}
+
+	// The wrapper structurally implements Flusher regardless - Go's
+	// http.Flusher has no way to express "unsupported" via a type
+	// assertion - so the property under test is that Flush() must not
+	// mark the response committed when nothing was actually flushed.
+	f, ok := (http.ResponseWriter)(tw).(http.Flusher)
+	if !ok {
+		t.Fatal("trackingResponseWriter should structurally implement http.Flusher regardless")
+	}
+	f.Flush()
+
+	if tw.wroteHeader {
+		t.Error("Flush() marked the response committed even though the underlying writer doesn't support http.Flusher - nothing was actually written, so RecoveryMiddleware would wrongly skip writing the real error response after a later panic")
+	}
+}
+
+func TestTrackingResponseWriterInformationalHeaderIsNotCommitment(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	tw.WriteHeader(http.StatusEarlyHints) // 103
+	if tw.wroteHeader {
+		t.Errorf("WriteHeader(103) marked the response committed (status=%d) - a 1xx informational header isn't the final response, so a later panic still needs RecoveryMiddleware to write the real error response", tw.status)
+	}
+
+	tw.WriteHeader(http.StatusOK)
+	if !tw.wroteHeader || tw.status != http.StatusOK {
+		t.Errorf("wroteHeader=%v status=%d after a real final WriteHeader, want true/%d", tw.wroteHeader, tw.status, http.StatusOK)
+	}
+}
+
+func TestTrackingResponseWriterIgnoresRepeatedFinalWriteHeader(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	tw.WriteHeader(http.StatusNotFound)
+	tw.WriteHeader(http.StatusInternalServerError) // must be a no-op: the first final status already committed
+
+	if tw.status != http.StatusNotFound {
+		t.Errorf("tw.status = %d, want %d (the first final WriteHeader call should stick)", tw.status, http.StatusNotFound)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("rec.Code = %d, want %d (a repeated final WriteHeader must not reach the underlying writer)", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestTrackingResponseWriterSwitchingProtocolsIsCommitment(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	tw.WriteHeader(http.StatusSwitchingProtocols)
+	if !tw.wroteHeader || tw.status != http.StatusSwitchingProtocols {
+		t.Errorf("wroteHeader=%v status=%d after WriteHeader(101), want true/%d (a protocol transition, not an informational preamble)", tw.wroteHeader, tw.status, http.StatusSwitchingProtocols)
+	}
+}
+
 func TestTrackingResponseWriterUnwrap(t *testing.T) {
 	rec := httptest.NewRecorder()
 	tw := &trackingResponseWriter{ResponseWriter: rec}
@@ -947,6 +1041,58 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
 			t.Errorf("response_committed_status field = %v, want %v (Flush alone should default the tracked status to 200)", logger.calls[0].fields["response_committed_status"], http.StatusOK)
+		}
+	})
+
+	t.Run("panic after Flush on a non-flushing writer still gets the error response", func(t *testing.T) {
+		logger := &recordingLogger{}
+		underlying := &nonFlushingWriter{rec: httptest.NewRecorder()}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The tracking wrapper structurally implements http.Flusher
+			// regardless of what the underlying writer supports, so this
+			// assertion succeeds - but nothing is actually flushed.
+			w.(http.Flusher).Flush()
+			panic("boom after a no-op flush")
+		}))
+
+		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if underlying.rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d (a no-op Flush on a non-flushing writer must not be treated as committing the response)", underlying.rec.Code, http.StatusInternalServerError)
+		}
+		var resp HTTPErrorResponse
+		if err := json.Unmarshal(underlying.rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", err, underlying.rec.Body.String())
+		}
+		if resp.Error.Code != ErrCodeInternal {
+			t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+		}
+	})
+
+	t.Run("panic after an informational 1xx header still gets the error response", func(t *testing.T) {
+		// httptest.ResponseRecorder, unlike a real net/http server
+		// connection, has no special handling for repeated WriteHeader
+		// calls carrying a 1xx status - it just latches its Code/body on
+		// the first call regardless of status, so it can't faithfully
+		// stand in for what a real client would receive here. What this
+		// test can verify reliably is RecoveryMiddleware's own decision:
+		// the log message it chose proves whether it believed the
+		// response was still safe to write to (the plain message) or
+		// already committed (the committed-response variant).
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusEarlyHints) // 103 - not the final response
+			panic("boom after an informational header")
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler" {
+			t.Errorf("log msg = %q, want the not-yet-committed variant (a 1xx informational header must not be treated as the final committed response)", logger.calls[0].msg)
 		}
 	})
 
