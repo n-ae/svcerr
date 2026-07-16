@@ -16,6 +16,16 @@
 // separate Go module nested in this repo; only importing it pulls zerolog
 // into a caller's build, not this package - this module has zero
 // dependencies of its own.)
+//
+// Errors are not safe for concurrent mutation. SetPublicMessage,
+// SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
+// and RecaptureStackTrace all mutate the receiver in place with no
+// locking, and the exported struct fields on ValidationError,
+// DatabaseError, and the other semantic types are plain fields, not
+// synchronized accessors. This is fine for the normal pattern of
+// constructing and configuring an error locally before returning it, but
+// don't call these once an error might be read or mutated from another
+// goroutine (e.g. after handing it to a shared error-collection type).
 package svcerr
 
 import (
@@ -90,6 +100,33 @@ type PublicMessager interface {
 	PublicMessage() (string, bool)
 }
 
+// PublicDetailer is implemented by any error that customizes the
+// structured "details" map WriteHTTPError/WriteHTTPProblem send - keys to
+// add or override beyond whatever a built-in type's automatic extraction
+// already contributes (or, for a code with no dedicated type, the only
+// source of details at all), and keys to suppress from that automatic
+// extraction (e.g. hiding NotFoundError's resource_id when the identifier
+// is sensitive). BaseError implements it via SetPublicDetail/
+// RemovePublicDetail.
+type PublicDetailer interface {
+	PublicDetails() (add map[string]interface{}, remove map[string]struct{})
+}
+
+// ProblemTyper is implemented by any error that specifies its own RFC 9457
+// "type" URI for WriteHTTPProblem, in place of the default "about:blank".
+// BaseError implements it via SetProblemType/ProblemType.
+type ProblemTyper interface {
+	ProblemType() (string, bool)
+}
+
+// ProblemInstancer is implemented by any error that specifies its own RFC
+// 9457 "instance" URI for WriteHTTPProblem - e.g. a request ID or trace
+// URL for this specific occurrence. BaseError implements it via
+// SetProblemInstance/ProblemInstance.
+type ProblemInstancer interface {
+	ProblemInstance() (string, bool)
+}
+
 // ErrorWithCode is the full capability set every type in this package
 // implements via BaseError: Coder and StackTracer, plus error and Unwrap.
 // Prefer the narrower Coder, StackTracer, or PublicMessager when writing a
@@ -105,12 +142,22 @@ type ErrorWithCode interface {
 
 // BaseError provides common error functionality
 type BaseError struct {
-	code          ErrorCode
-	message       string
-	cause         error
-	stackTrace    []string
-	context       map[string]interface{}
-	publicMessage string
+	code    ErrorCode
+	message string
+	cause   error
+	// pcs holds raw program counters from the capture site, not formatted
+	// strings - StackTrace resolves and formats them lazily, since most
+	// constructed errors never have StackTrace/GetStackTrace called on
+	// them (errorLogFields only asks for one on a 5xx response), and
+	// runtime.Callers is far cheaper than symbolizing every frame eagerly
+	// on every single construction.
+	pcs                   []uintptr
+	context               map[string]interface{}
+	publicMessage         string
+	publicDetailAdditions map[string]interface{}
+	publicDetailRemovals  map[string]struct{}
+	problemType           string
+	problemInstance       string
 }
 
 // Code returns the error code
@@ -131,19 +178,20 @@ func (e *BaseError) Unwrap() error {
 	return e.cause
 }
 
-// StackTrace returns a copy of the captured stack trace - callers can't
-// mutate the error's internal state through the returned slice.
+// StackTrace resolves and formats the stack trace captured when this
+// error was constructed (or last RecaptureStackTrace'd). Each call builds
+// a fresh []string, so there's no shared internal state for a caller to
+// mutate through the result - but also no caching, so calling it
+// repeatedly re-resolves the frames each time.
 func (e *BaseError) StackTrace() []string {
-	if e.stackTrace == nil {
-		return nil
-	}
-	stack := make([]string, len(e.stackTrace))
-	copy(stack, e.stackTrace)
-	return stack
+	return formatStackTrace(e.pcs)
 }
 
-// Context returns a copy of the error context - callers can't mutate the
-// error's internal state through the returned map.
+// Context returns a shallow copy of the error context: callers can't add,
+// remove, or replace top-level keys in the error's internal map through
+// the returned one, but a value that's itself a map, slice, or pointer is
+// shared, not copied - mutating that value's contents still reaches into
+// the error.
 func (e *BaseError) Context() map[string]interface{} {
 	if e.context == nil {
 		return nil
@@ -171,6 +219,69 @@ func (e *BaseError) PublicMessage() (string, bool) {
 	return e.publicMessage, e.publicMessage != ""
 }
 
+// SetPublicDetail adds or overrides a key in the structured "details" map
+// WriteHTTPError/WriteHTTPProblem send to the client, alongside whatever
+// this error's built-in type already contributes (e.g. NotFoundError's
+// resource_type/resource_id) - or, for a code with no dedicated type (New/
+// Wrap), the only source of details at all. Unlike SetPublicMessage, this
+// can be called more than once to add several keys.
+func (e *BaseError) SetPublicDetail(key string, value interface{}) {
+	if e.publicDetailAdditions == nil {
+		e.publicDetailAdditions = map[string]interface{}{}
+	}
+	e.publicDetailAdditions[key] = value
+}
+
+// RemovePublicDetail suppresses key from the structured "details" map,
+// even if this error's built-in type would otherwise include it - e.g.
+// hiding NotFoundError's resource_id when the identifier itself is
+// sensitive (an email address, say).
+func (e *BaseError) RemovePublicDetail(key string) {
+	if e.publicDetailRemovals == nil {
+		e.publicDetailRemovals = map[string]struct{}{}
+	}
+	e.publicDetailRemovals[key] = struct{}{}
+}
+
+// PublicDetails returns the keys SetPublicDetail added or overrode, and
+// the keys RemovePublicDetail suppressed - the capability
+// extractErrorDetails needs to apply both on top of a built-in type's
+// automatic extraction.
+func (e *BaseError) PublicDetails() (add map[string]interface{}, remove map[string]struct{}) {
+	return e.publicDetailAdditions, e.publicDetailRemovals
+}
+
+// SetProblemType overrides the RFC 9457 "type" URI WriteHTTPProblem sends
+// for this error, in place of the default "about:blank". Per RFC 9457,
+// pair this with a stable, occurrence-invariant Title too (there's
+// currently no override for Title - it stays the HTTP status's reason
+// phrase, correct for "about:blank" but not necessarily for a custom type
+// URI); WriteHTTPProblem doesn't provide one, so a caller wanting a
+// specific Title alongside a custom Type should use ProblemDetails
+// directly instead of WriteHTTPProblem.
+func (e *BaseError) SetProblemType(uri string) {
+	e.problemType = uri
+}
+
+// ProblemType returns the URI set by SetProblemType, and whether one was
+// set at all.
+func (e *BaseError) ProblemType() (string, bool) {
+	return e.problemType, e.problemType != ""
+}
+
+// SetProblemInstance sets the RFC 9457 "instance" URI WriteHTTPProblem
+// sends for this specific occurrence - e.g. a request ID or trace URL.
+// Unset by default, in which case the field is omitted entirely.
+func (e *BaseError) SetProblemInstance(uri string) {
+	e.problemInstance = uri
+}
+
+// ProblemInstance returns the URI set by SetProblemInstance, and whether
+// one was set at all.
+func (e *BaseError) ProblemInstance() (string, bool) {
+	return e.problemInstance, e.problemInstance != ""
+}
+
 // ownMessage returns e.message alone, never a wrapped cause's text -
 // unlike Error(), which appends the cause when one is set. Every
 // constructor in this package (New, Wrap, and every semantic New*/Wrap*
@@ -185,50 +296,78 @@ func (e *BaseError) ownMessage() string {
 // which all embed it - satisfies each capability interface individually as
 // well as their combination.
 var (
-	_ Coder          = (*BaseError)(nil)
-	_ StackTracer    = (*BaseError)(nil)
-	_ PublicMessager = (*BaseError)(nil)
-	_ ErrorWithCode  = (*BaseError)(nil)
+	_ Coder            = (*BaseError)(nil)
+	_ StackTracer      = (*BaseError)(nil)
+	_ PublicMessager   = (*BaseError)(nil)
+	_ PublicDetailer   = (*BaseError)(nil)
+	_ ProblemTyper     = (*BaseError)(nil)
+	_ ProblemInstancer = (*BaseError)(nil)
+	_ ErrorWithCode    = (*BaseError)(nil)
 )
 
 // stackPathSegments is the number of trailing path segments kept when
 // shortening a stack frame's file path (e.g. "internal/errors/http.go").
 const stackPathSegments = 3
 
-// captureStackTrace captures the current stack trace
-func captureStackTrace(skip int) []string {
-	var stack []string
-	for i := skip; i < skip+10; i++ {
-		pc, file, line, ok := runtime.Caller(i)
-		if !ok {
-			break
-		}
-		fn := runtime.FuncForPC(pc)
-		if fn == nil {
-			continue
-		}
+// maxStackFrames caps how many frames captureStackTrace records - matches
+// the old runtime.Caller loop's fixed 10-frame bound.
+const maxStackFrames = 10
+
+// captureStackTrace records raw program counters for the current call
+// stack via a single runtime.Callers call. Resolving them into the
+// formatted "file:line func" strings StackTrace/GetStackTrace return is
+// deferred to formatStackTrace, since most constructed errors never have
+// that called on them (errorLogFields only includes a stack trace for a
+// 5xx response) - runtime.Callers is far cheaper than symbolizing every
+// frame with runtime.FuncForPC on every single construction, most of
+// which pay that cost for nothing.
+func captureStackTrace(skip int) []uintptr {
+	pcs := make([]uintptr, maxStackFrames)
+	// runtime.Callers' skip counts its own frame as 0 - one more than
+	// runtime.Caller's "0 identifies the caller of Caller", which already
+	// excludes Caller's own frame. skip+1 here lands on the same frame
+	// skip did under the old runtime.Caller-loop implementation, so every
+	// New*/Wrap* call site passing captureStackTrace(2) is unaffected.
+	n := runtime.Callers(skip+1, pcs)
+	return pcs[:n]
+}
+
+// formatStackTrace resolves pcs into the shortened "file:line func" string
+// form StackTrace/GetStackTrace return.
+func formatStackTrace(pcs []uintptr) []string {
+	if len(pcs) == 0 {
+		return nil
+	}
+	stack := make([]string, 0, len(pcs))
+	frames := runtime.CallersFrames(pcs)
+	for {
+		frame, more := frames.Next()
 		// Shorten file path for readability: keep only the trailing
 		// segments rather than the full absolute path, since this
 		// package has no way to know the caller's repo layout.
+		file := frame.File
 		parts := strings.Split(file, "/")
 		if len(parts) > stackPathSegments {
 			file = strings.Join(parts[len(parts)-stackPathSegments:], "/")
 		}
-		stack = append(stack, fmt.Sprintf("%s:%d %s", file, line, fn.Name()))
+		stack = append(stack, fmt.Sprintf("%s:%d %s", file, frame.Line, frame.Function))
+		if !more {
+			break
+		}
 	}
 	return stack
 }
 
 // setStackTrace lets RecaptureStackTrace overwrite the trace captured at
 // construction time.
-func (e *BaseError) setStackTrace(s []string) {
-	e.stackTrace = s
+func (e *BaseError) setStackTrace(pcs []uintptr) {
+	e.pcs = pcs
 }
 
 // stackTraceSetter is implemented by every BaseError-derived type via
 // promotion; RecaptureStackTrace checks it through errors.As.
 type stackTraceSetter interface {
-	setStackTrace([]string)
+	setStackTrace([]uintptr)
 }
 
 // RecaptureStackTrace re-captures err's stack trace starting extraSkip
@@ -255,9 +394,9 @@ func RecaptureStackTrace(err error, extraSkip int) {
 // ErrCodeDatabaseMigration, ErrCodeResourceConflict, or ErrCodeQuotaExceeded.
 func New(code ErrorCode, message string) *BaseError {
 	return &BaseError{
-		code:       code,
-		message:    message,
-		stackTrace: captureStackTrace(2),
+		code:    code,
+		message: message,
+		pcs:     captureStackTrace(2),
 	}
 }
 
@@ -266,10 +405,10 @@ func New(code ErrorCode, message string) *BaseError {
 // clients unless SetPublicMessage is called explicitly.
 func Wrap(err error, code ErrorCode, message string) *BaseError {
 	return &BaseError{
-		code:       code,
-		message:    message,
-		cause:      err,
-		stackTrace: captureStackTrace(2),
+		code:    code,
+		message: message,
+		cause:   err,
+		pcs:     captureStackTrace(2),
 	}
 }
 
@@ -284,9 +423,9 @@ type ValidationError struct {
 func NewValidationError(message string, field string, value interface{}) *ValidationError {
 	return &ValidationError{
 		BaseError: BaseError{
-			code:       ErrCodeInvalidInput,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeInvalidInput,
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"field": field,
 				"value": value,
@@ -301,10 +440,10 @@ func NewValidationError(message string, field string, value interface{}) *Valida
 func WrapValidationError(err error, message string, field string) *ValidationError {
 	return &ValidationError{
 		BaseError: BaseError{
-			code:       ErrCodeInvalidInput,
-			message:    message,
-			cause:      err,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeInvalidInput,
+			message: message,
+			cause:   err,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"field": field,
 			},
@@ -316,17 +455,35 @@ func WrapValidationError(err error, message string, field string) *ValidationErr
 // DatabaseError represents database operation errors
 type DatabaseError struct {
 	BaseError
-	Operation string // "query", "insert", "update", "delete", "transaction"
+	Operation string // "query", "insert", "update", "delete", "transaction", "migration"
 	Query     string
+}
+
+// databaseErrorCode maps a DatabaseError's Operation to its ErrorCode -
+// ErrCodeDatabaseTransaction/ErrCodeDatabaseMigration for those two
+// specific operations (both still map to the same 500 HTTPStatusCode as
+// ErrCodeDatabaseQuery, but the distinct code lets a caller branch on it,
+// or override its status independently via RegisterStatusCode), and
+// ErrCodeDatabaseQuery for everything else ("query", "insert", "update",
+// "delete", or any operation string not recognized here).
+func databaseErrorCode(operation string) ErrorCode {
+	switch operation {
+	case "transaction":
+		return ErrCodeDatabaseTransaction
+	case "migration":
+		return ErrCodeDatabaseMigration
+	default:
+		return ErrCodeDatabaseQuery
+	}
 }
 
 // NewDatabaseError creates a new database error
 func NewDatabaseError(operation, message string) *DatabaseError {
 	return &DatabaseError{
 		BaseError: BaseError{
-			code:       ErrCodeDatabaseQuery,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    databaseErrorCode(operation),
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"operation": operation,
 			},
@@ -339,10 +496,10 @@ func NewDatabaseError(operation, message string) *DatabaseError {
 func WrapDatabaseError(err error, operation, query string) *DatabaseError {
 	return &DatabaseError{
 		BaseError: BaseError{
-			code:       ErrCodeDatabaseQuery,
-			message:    fmt.Sprintf("database %s failed", operation),
-			cause:      err,
-			stackTrace: captureStackTrace(2),
+			code:    databaseErrorCode(operation),
+			message: fmt.Sprintf("database %s failed", operation),
+			cause:   err,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"operation": operation,
 				"query":     query,
@@ -366,9 +523,9 @@ type ExternalAPIError struct {
 func NewExternalAPIError(service, message string, statusCode int, url string) *ExternalAPIError {
 	return &ExternalAPIError{
 		BaseError: BaseError{
-			code:       ErrCodeExternalAPI,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeExternalAPI,
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"service":     service,
 				"status_code": statusCode,
@@ -385,10 +542,10 @@ func NewExternalAPIError(service, message string, statusCode int, url string) *E
 func WrapExternalAPIError(err error, service, url string, statusCode int) *ExternalAPIError {
 	return &ExternalAPIError{
 		BaseError: BaseError{
-			code:       ErrCodeExternalAPI,
-			message:    fmt.Sprintf("%s API call failed", service),
-			cause:      err,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeExternalAPI,
+			message: fmt.Sprintf("%s API call failed", service),
+			cause:   err,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"service":     service,
 				"url":         url,
@@ -422,9 +579,9 @@ func NewAuthenticationError(reason, message string) *AuthenticationError {
 
 	return &AuthenticationError{
 		BaseError: BaseError{
-			code:       code,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    code,
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"reason": reason,
 			},
@@ -444,9 +601,9 @@ type NotFoundError struct {
 func NewNotFoundError(resourceType, resourceID string) *NotFoundError {
 	return &NotFoundError{
 		BaseError: BaseError{
-			code:       ErrCodeNotFound,
-			message:    fmt.Sprintf("%s not found: %s", resourceType, resourceID),
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeNotFound,
+			message: fmt.Sprintf("%s not found: %s", resourceType, resourceID),
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"resource_type": resourceType,
 				"resource_id":   resourceID,
@@ -468,9 +625,9 @@ type ConflictError struct {
 func NewConflictError(resourceType, conflictKey, message string) *ConflictError {
 	return &ConflictError{
 		BaseError: BaseError{
-			code:       ErrCodeAlreadyExists,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeAlreadyExists,
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"resource_type": resourceType,
 				"conflict_key":  conflictKey,
@@ -493,9 +650,9 @@ type RateLimitError struct {
 func NewRateLimitError(service string, limit, retryAfter int) *RateLimitError {
 	return &RateLimitError{
 		BaseError: BaseError{
-			code:       ErrCodeRateLimitExceeded,
-			message:    fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeRateLimitExceeded,
+			message: fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"service":     service,
 				"limit":       limit,
@@ -518,9 +675,9 @@ type InternalError struct {
 func NewInternalError(component, message string) *InternalError {
 	return &InternalError{
 		BaseError: BaseError{
-			code:       ErrCodeInternal,
-			message:    message,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeInternal,
+			message: message,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"component": component,
 			},
@@ -533,10 +690,10 @@ func NewInternalError(component, message string) *InternalError {
 func WrapInternalError(err error, component, message string) *InternalError {
 	return &InternalError{
 		BaseError: BaseError{
-			code:       ErrCodeInternal,
-			message:    message,
-			cause:      err,
-			stackTrace: captureStackTrace(2),
+			code:    ErrCodeInternal,
+			message: message,
+			cause:   err,
+			pcs:     captureStackTrace(2),
 			context: map[string]interface{}{
 				"component": component,
 			},

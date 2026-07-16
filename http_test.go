@@ -508,6 +508,32 @@ func TestWriteHTTPProblem(t *testing.T) {
 		}
 	})
 
+	t.Run("SetProblemType/SetProblemInstance override the response", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		err := NewNotFoundError("league", "12345")
+		err.SetProblemType("https://example.com/problems/resource-not-found")
+		err.SetProblemInstance("https://example.com/requests/abc123")
+
+		WriteHTTPProblem(w, err, logger)
+
+		var resp map[string]interface{}
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if resp["type"] != "https://example.com/problems/resource-not-found" {
+			t.Errorf(`resp["type"] = %v, want the SetProblemType override`, resp["type"])
+		}
+		if resp["instance"] != "https://example.com/requests/abc123" {
+			t.Errorf(`resp["instance"] = %v, want the SetProblemInstance override`, resp["instance"])
+		}
+		// Title stays the status's reason phrase regardless of a custom
+		// Type - WriteHTTPProblem has no per-error Title override.
+		if resp["title"] != "Not Found" {
+			t.Errorf(`resp["title"] = %v, want "Not Found"`, resp["title"])
+		}
+	})
+
 	t.Run("rate limit error sets Retry-After header", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}

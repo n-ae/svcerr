@@ -238,22 +238,38 @@ func WriteProblem(w http.ResponseWriter, err error) int {
 func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 	code := GetErrorCode(err)
 	statusCode := HTTPStatusCode(code)
+	node := outermostCoded(err)
+
+	problemType := "about:blank"
+	if pt, ok := node.(ProblemTyper); ok {
+		if uri, set := pt.ProblemType(); set {
+			problemType = uri
+		}
+	}
+	var instance string
+	if pi, ok := node.(ProblemInstancer); ok {
+		instance, _ = pi.ProblemInstance()
+	}
 
 	problem := ProblemDetails{
-		Type: "about:blank",
+		Type: problemType,
 		// RFC 9457 4.2.1: when type is "about:blank", title SHOULD be the
 		// same as the HTTP status's reason phrase (e.g. "Not Found" for
 		// 404) - the occurrence-specific text belongs in Detail, not Title.
+		// This package has no per-error Title override (see
+		// BaseError.SetProblemType), so a custom Type still gets this
+		// same status-derived Title.
 		Title:      http.StatusText(statusCode),
 		Status:     statusCode,
 		Detail:     getUserFriendlyMessage(code, err),
+		Instance:   instance,
 		Code:       code,
 		Extensions: extractErrorDetails(err),
 	}
 
 	w.Header().Set("Content-Type", "application/problem+json")
 
-	if rle, ok := outermostCoded(err).(*RateLimitError); ok {
+	if rle, ok := node.(*RateLimitError); ok {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
 	}
 
@@ -388,8 +404,9 @@ func defaultMessageForCode(code ErrorCode) string {
 // with a wrapped error's details.
 func extractErrorDetails(err error) map[string]interface{} {
 	details := make(map[string]interface{})
+	node := outermostCoded(err)
 
-	switch v := outermostCoded(err).(type) {
+	switch v := node.(type) {
 	case *ValidationError:
 		if v.Field != "" {
 			details["field"] = v.Field
@@ -417,6 +434,20 @@ func extractErrorDetails(err error) map[string]interface{} {
 	case *RateLimitError:
 		details["limit"] = v.Limit
 		details["retry_after"] = v.RetryAfter
+	}
+
+	// SetPublicDetail/RemovePublicDetail overrides, from the same
+	// outermost coded node the built-in extraction above came from -
+	// applied after it, so an addition can override a built-in key and a
+	// removal can suppress one.
+	if pd, ok := node.(PublicDetailer); ok {
+		add, remove := pd.PublicDetails()
+		for k, v := range add {
+			details[k] = v
+		}
+		for k := range remove {
+			delete(details, k)
+		}
 	}
 
 	if len(details) == 0 {

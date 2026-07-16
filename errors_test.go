@@ -682,6 +682,110 @@ func TestPublicMessageDoesNotCrossOuterClassification(t *testing.T) {
 	}
 }
 
+func TestPublicDetailAdditionsAndRemovals(t *testing.T) {
+	t.Run("New/Wrap have no automatic details, but SetPublicDetail adds them", func(t *testing.T) {
+		err := New(ErrCodeConstraintViolation, "out of stock")
+		err.SetPublicDetail("sku", "WIDGET-42")
+		err.SetPublicDetail("available", 0)
+
+		got := extractErrorDetails(err)
+		if got["sku"] != "WIDGET-42" {
+			t.Errorf(`details["sku"] = %v, want "WIDGET-42"`, got["sku"])
+		}
+		if got["available"] != 0 {
+			t.Errorf(`details["available"] = %v, want 0`, got["available"])
+		}
+	})
+
+	t.Run("SetPublicDetail overrides a built-in type's automatic key", func(t *testing.T) {
+		err := NewNotFoundError("user", "secret@example.com")
+		err.SetPublicDetail("resource_id", "[redacted]")
+
+		got := extractErrorDetails(err)
+		if got["resource_id"] != "[redacted]" {
+			t.Errorf(`details["resource_id"] = %v, want "[redacted]"`, got["resource_id"])
+		}
+		if got["resource_type"] != "user" {
+			t.Errorf(`details["resource_type"] = %v, want "user" (unrelated built-in keys stay)`, got["resource_type"])
+		}
+	})
+
+	t.Run("RemovePublicDetail suppresses a built-in type's automatic key", func(t *testing.T) {
+		err := NewNotFoundError("user", "secret@example.com")
+		err.RemovePublicDetail("resource_id")
+
+		got := extractErrorDetails(err)
+		if _, present := got["resource_id"]; present {
+			t.Errorf(`details["resource_id"] = %v, want the key entirely absent`, got["resource_id"])
+		}
+		if got["resource_type"] != "user" {
+			t.Errorf(`details["resource_type"] = %v, want "user" (unrelated built-in keys stay)`, got["resource_type"])
+		}
+	})
+
+	t.Run("removing every key leaves details nil, not an empty map", func(t *testing.T) {
+		err := NewValidationError("bad email", "email", "not-an-email")
+		err.RemovePublicDetail("field")
+
+		if got := extractErrorDetails(err); got != nil {
+			t.Errorf("extractErrorDetails() = %v, want nil", got)
+		}
+	})
+}
+
+func TestProblemTypeAndInstanceOverrides(t *testing.T) {
+	err := NewNotFoundError("league", "42")
+
+	if _, set := err.ProblemType(); set {
+		t.Error("ProblemType() set = true before SetProblemType, want false")
+	}
+	err.SetProblemType("https://example.com/problems/resource-not-found")
+	if got, ok := err.ProblemType(); !ok || got != "https://example.com/problems/resource-not-found" {
+		t.Errorf("ProblemType() = (%q, %v), want the URI set by SetProblemType", got, ok)
+	}
+
+	if _, set := err.ProblemInstance(); set {
+		t.Error("ProblemInstance() set = true before SetProblemInstance, want false")
+	}
+	err.SetProblemInstance("https://example.com/requests/abc123")
+	if got, ok := err.ProblemInstance(); !ok || got != "https://example.com/requests/abc123" {
+		t.Errorf("ProblemInstance() = (%q, %v), want the URI set by SetProblemInstance", got, ok)
+	}
+}
+
+func TestDatabaseErrorCodeFromOperation(t *testing.T) {
+	tests := []struct {
+		operation string
+		want      ErrorCode
+	}{
+		{"query", ErrCodeDatabaseQuery},
+		{"insert", ErrCodeDatabaseQuery},
+		{"update", ErrCodeDatabaseQuery},
+		{"delete", ErrCodeDatabaseQuery},
+		{"transaction", ErrCodeDatabaseTransaction},
+		{"migration", ErrCodeDatabaseMigration},
+		{"", ErrCodeDatabaseQuery},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			if got := NewDatabaseError(tt.operation, "boom").Code(); got != tt.want {
+				t.Errorf("NewDatabaseError(%q, ...).Code() = %v, want %v", tt.operation, got, tt.want)
+			}
+			if got := WrapDatabaseError(errors.New("cause"), tt.operation, "SELECT 1").Code(); got != tt.want {
+				t.Errorf("WrapDatabaseError(_, %q, ...).Code() = %v, want %v", tt.operation, got, tt.want)
+			}
+		})
+	}
+
+	// Both still map to the same HTTP status as ErrCodeDatabaseQuery.
+	if HTTPStatusCode(ErrCodeDatabaseTransaction) != HTTPStatusCode(ErrCodeDatabaseQuery) {
+		t.Error("ErrCodeDatabaseTransaction should map to the same status as ErrCodeDatabaseQuery")
+	}
+	if HTTPStatusCode(ErrCodeDatabaseMigration) != HTTPStatusCode(ErrCodeDatabaseQuery) {
+		t.Error("ErrCodeDatabaseMigration should map to the same status as ErrCodeDatabaseQuery")
+	}
+}
+
 func TestRecaptureStackTrace(t *testing.T) {
 	// newViaHelper mimics a caller wrapping a constructor in their own
 	// helper function - without RecaptureStackTrace, the trace's top
@@ -765,6 +869,15 @@ func TestStackTraceFiltering(t *testing.T) {
 		if strings.HasPrefix(frame, "/") {
 			t.Errorf("Stack frame contains unfiltered absolute path: %s", frame)
 		}
+	}
+}
+
+func TestFormatStackTraceEmpty(t *testing.T) {
+	if got := formatStackTrace(nil); got != nil {
+		t.Errorf("formatStackTrace(nil) = %v, want nil", got)
+	}
+	if got := formatStackTrace([]uintptr{}); got != nil {
+		t.Errorf("formatStackTrace([]uintptr{}) = %v, want nil", got)
 	}
 }
 

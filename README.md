@@ -78,7 +78,23 @@ body instead, for clients that expect the standard problem-details shape:
 occurrence (and follows the same public/internal message rules as
 `WriteHTTPError` - see "Public vs. internal messages" below). Extension
 members (`code`, `resource_type`, `resource_id`, ...) sit at the top level,
-per RFC 9457, rather than nested under a sub-object.
+per RFC 9457, rather than nested under a sub-object; see "Public details"
+below for adding to or suppressing them.
+
+`SetProblemType`/`SetProblemInstance` override `type`/`instance` on a
+specific error instance, for an application with its own stable
+problem-type URIs instead of `about:blank`:
+
+```go
+err := svcerr.NewNotFoundError("league", id)
+err.SetProblemType("https://example.com/problems/resource-not-found")
+err.SetProblemInstance(requestURL) // omitted entirely when unset
+```
+
+`title` stays the HTTP status's reason phrase regardless - there's no
+per-error `Title` override on `WriteHTTPProblem`. A caller that wants a
+custom `Title` alongside a custom `Type` can construct `ProblemDetails`
+directly instead.
 
 `UserMessage(err)` returns just the sanitized message, for callers
 embedding it in a custom response.
@@ -166,6 +182,18 @@ type StackTracer interface {
 type PublicMessager interface {
 	PublicMessage() (string, bool) // getUserFriendlyMessage / UserMessage overrides
 }
+
+type PublicDetailer interface {
+	PublicDetails() (add map[string]interface{}, remove map[string]struct{}) // extractErrorDetails overrides
+}
+
+type ProblemTyper interface {
+	ProblemType() (string, bool) // WriteHTTPProblem's "type", instead of "about:blank"
+}
+
+type ProblemInstancer interface {
+	ProblemInstance() (string, bool) // WriteHTTPProblem's "instance"
+}
 ```
 
 A minimal type implementing `Coder` (and `error`) is enough to get correct
@@ -200,6 +228,27 @@ err.SetPublicMessage("We're having trouble reaching the database. Please try aga
 return err // WriteHTTPError/UserMessage now send the override; logs still get err.Error()
 ```
 
+### Public details
+
+Built-in types automatically contribute a few structured fields to the
+response's `details` map - `NotFoundError`'s `resource_type`/`resource_id`,
+`ValidationError`'s `field`, `RateLimitError`'s `limit`/`retry_after`, and
+so on (never anything caller-supplied and unbounded, like
+`ValidationError.Value` - see the source for the exact list per type).
+`SetPublicDetail`/`RemovePublicDetail` let you add to or suppress that on
+a specific error instance, and are the only way to get structured details
+at all for a code built with the generic `New`/`Wrap` (which have no
+built-in type to extract from):
+
+```go
+err := svcerr.NewNotFoundError("user", customerEmail)
+err.RemovePublicDetail("resource_id") // the identifier itself is sensitive here
+
+err := svcerr.New(svcerr.ErrCodeConstraintViolation, "out of stock")
+err.SetPublicDetail("sku", sku)
+err.SetPublicDetail("available", 0)
+```
+
 ### Wrapping constructors in your own helper
 
 Every `New*`/`Wrap*` constructor assumes it's called directly from the site
@@ -218,6 +267,15 @@ func validateTeamID(id string) error {
 	return nil
 }
 ```
+
+### Concurrency
+
+Errors aren't safe for concurrent mutation. `SetPublicMessage`,
+`SetPublicDetail`, `RemovePublicDetail`, `SetProblemType`,
+`SetProblemInstance`, and `RecaptureStackTrace` all mutate the receiver in
+place with no locking. That's fine for the normal pattern - construct an
+error, configure it, return it - but don't call these once an error might
+be read or mutated from another goroutine.
 
 ### Logging
 
