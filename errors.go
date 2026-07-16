@@ -19,8 +19,8 @@
 //
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
-// and RecaptureStackTrace all mutate the receiver in place with no
-// locking, and the exported struct fields on ValidationError,
+// SetProblemTitle, and RecaptureStackTrace all mutate the receiver in
+// place with no locking, and the exported struct fields on ValidationError,
 // DatabaseError, and the other semantic types are plain fields, not
 // synchronized accessors. This is fine for the normal pattern of
 // constructing and configuring an error locally before returning it, but
@@ -127,6 +127,16 @@ type ProblemInstancer interface {
 	ProblemInstance() (string, bool)
 }
 
+// ProblemTitler is implemented by any error that specifies its own RFC
+// 9457 "title" for WriteHTTPProblem, in place of the default
+// http.StatusText(status) - useful alongside a custom SetProblemType,
+// since RFC 9457 defines title as a short, occurrence-invariant summary
+// of that specific problem type, not of the HTTP status in general.
+// BaseError implements it via SetProblemTitle/ProblemTitle.
+type ProblemTitler interface {
+	ProblemTitle() (string, bool)
+}
+
 // ErrorWithCode is the full capability set every type in this package
 // implements via BaseError: Coder and StackTracer, plus error and Unwrap.
 // Prefer the narrower Coder, StackTracer, or PublicMessager when writing a
@@ -158,6 +168,7 @@ type BaseError struct {
 	publicDetailRemovals  map[string]struct{}
 	problemType           string
 	problemInstance       string
+	problemTitle          string
 }
 
 // Code returns the error code
@@ -259,12 +270,10 @@ func (e *BaseError) PublicDetails() (add map[string]interface{}, remove map[stri
 
 // SetProblemType overrides the RFC 9457 "type" URI WriteHTTPProblem sends
 // for this error, in place of the default "about:blank". Per RFC 9457,
-// pair this with a stable, occurrence-invariant Title too (there's
-// currently no override for Title - it stays the HTTP status's reason
-// phrase, correct for "about:blank" but not necessarily for a custom type
-// URI); WriteHTTPProblem doesn't provide one, so a caller wanting a
-// specific Title alongside a custom Type should use ProblemDetails
-// directly instead of WriteHTTPProblem.
+// pair this with SetProblemTitle too - a stable, occurrence-invariant
+// summary of the custom type, since http.StatusText(status) (the default
+// Title, correct only for "about:blank") describes the HTTP status in
+// general, not this specific problem type.
 func (e *BaseError) SetProblemType(uri string) {
 	e.problemType = uri
 }
@@ -288,6 +297,19 @@ func (e *BaseError) ProblemInstance() (string, bool) {
 	return e.problemInstance, e.problemInstance != ""
 }
 
+// SetProblemTitle overrides the RFC 9457 "title" WriteHTTPProblem sends
+// for this error, in place of the default http.StatusText(status). See
+// SetProblemType.
+func (e *BaseError) SetProblemTitle(title string) {
+	e.problemTitle = title
+}
+
+// ProblemTitle returns the title set by SetProblemTitle, and whether one
+// was set at all.
+func (e *BaseError) ProblemTitle() (string, bool) {
+	return e.problemTitle, e.problemTitle != ""
+}
+
 // ownMessage returns e.message alone, never a wrapped cause's text -
 // unlike Error(), which appends the cause when one is set. Every
 // constructor in this package (New, Wrap, and every semantic New*/Wrap*
@@ -308,6 +330,7 @@ var (
 	_ PublicDetailer   = (*BaseError)(nil)
 	_ ProblemTyper     = (*BaseError)(nil)
 	_ ProblemInstancer = (*BaseError)(nil)
+	_ ProblemTitler    = (*BaseError)(nil)
 	_ ErrorWithCode    = (*BaseError)(nil)
 )
 

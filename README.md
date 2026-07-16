@@ -81,20 +81,21 @@ members (`code`, `resource_type`, `resource_id`, ...) sit at the top level,
 per RFC 9457, rather than nested under a sub-object; see "Public details"
 below for adding to or suppressing them.
 
-`SetProblemType`/`SetProblemInstance` override `type`/`instance` on a
-specific error instance, for an application with its own stable
-problem-type URIs instead of `about:blank`:
+`SetProblemType`/`SetProblemInstance`/`SetProblemTitle` override
+`type`/`instance`/`title` on a specific error instance, for an application
+with its own stable problem-type URIs instead of `about:blank`:
 
 ```go
 err := svcerr.NewNotFoundError("league", id)
 err.SetProblemType("https://example.com/problems/resource-not-found")
 err.SetProblemInstance(requestURL) // omitted entirely when unset
+err.SetProblemTitle("League not found")
 ```
 
-`title` stays the HTTP status's reason phrase regardless - there's no
-per-error `Title` override on `WriteHTTPProblem`. A caller that wants a
-custom `Title` alongside a custom `Type` can construct `ProblemDetails`
-directly instead.
+`title` stays the HTTP status's reason phrase absent `SetProblemTitle` -
+correct alongside the default `about:blank` type (per RFC 9457 §4.2.1),
+but RFC 9457 expects a custom type to define its own, occurrence-invariant
+title rather than reusing the HTTP status's in general.
 
 `UserMessage(err)` returns just the sanitized message, for callers
 embedding it in a custom response.
@@ -198,6 +199,10 @@ type ProblemTyper interface {
 type ProblemInstancer interface {
 	ProblemInstance() (string, bool) // WriteHTTPProblem's "instance"
 }
+
+type ProblemTitler interface {
+	ProblemTitle() (string, bool) // WriteHTTPProblem's "title", instead of http.StatusText(status)
+}
 ```
 
 A minimal type implementing `Coder` (and `error`) is enough to get correct
@@ -289,8 +294,8 @@ func validateTeamID(id string) error {
 
 Errors aren't safe for concurrent mutation. `SetPublicMessage`,
 `SetPublicDetail`, `RemovePublicDetail`, `SetProblemType`,
-`SetProblemInstance`, and `RecaptureStackTrace` all mutate the receiver in
-place with no locking. That's fine for the normal pattern - construct an
+`SetProblemInstance`, `SetProblemTitle`, and `RecaptureStackTrace` all
+mutate the receiver in place with no locking. That's fine for the normal pattern - construct an
 error, configure it, return it - but don't call these once an error might
 be read or mutated from another goroutine.
 

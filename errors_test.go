@@ -799,6 +799,14 @@ func TestProblemTypeAndInstanceOverrides(t *testing.T) {
 	if got, ok := err.ProblemInstance(); !ok || got != "https://example.com/requests/abc123" {
 		t.Errorf("ProblemInstance() = (%q, %v), want the URI set by SetProblemInstance", got, ok)
 	}
+
+	if _, set := err.ProblemTitle(); set {
+		t.Error("ProblemTitle() set = true before SetProblemTitle, want false")
+	}
+	err.SetProblemTitle("League not found")
+	if got, ok := err.ProblemTitle(); !ok || got != "League not found" {
+		t.Errorf("ProblemTitle() = (%q, %v), want the title set by SetProblemTitle", got, ok)
+	}
 }
 
 func TestDatabaseErrorCodeFromOperation(t *testing.T) {

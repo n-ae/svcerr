@@ -303,15 +303,23 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) int {
 		instance, _ = pi.ProblemInstance()
 	}
 
+	// RFC 9457 4.2.1: when type is "about:blank", title SHOULD be the
+	// same as the HTTP status's reason phrase (e.g. "Not Found" for 404) -
+	// the occurrence-specific text belongs in Detail, not Title. That's
+	// also a reasonable default alongside a custom Type, but
+	// SetProblemTitle overrides it for a caller who wants a title that
+	// actually describes their custom problem type rather than the HTTP
+	// status in general.
+	title := http.StatusText(statusCode)
+	if pt, ok := node.(ProblemTitler); ok {
+		if custom, set := pt.ProblemTitle(); set {
+			title = custom
+		}
+	}
+
 	problem := ProblemDetails{
-		Type: problemType,
-		// RFC 9457 4.2.1: when type is "about:blank", title SHOULD be the
-		// same as the HTTP status's reason phrase (e.g. "Not Found" for
-		// 404) - the occurrence-specific text belongs in Detail, not Title.
-		// This package has no per-error Title override (see
-		// BaseError.SetProblemType), so a custom Type still gets this
-		// same status-derived Title.
-		Title:      http.StatusText(statusCode),
+		Type:       problemType,
+		Title:      title,
 		Status:     statusCode,
 		Detail:     getUserFriendlyMessage(code, err),
 		Instance:   instance,
