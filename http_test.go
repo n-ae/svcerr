@@ -46,6 +46,49 @@ func TestHTTPStatusCode(t *testing.T) {
 	}
 }
 
+// TestGetUserFriendlyMessageDefaultsByCode exercises the per-code default
+// message switch in getUserFriendlyMessage directly (err = nil, so the
+// function can't take the early "use the error's own text" path). Every
+// declared ErrorCode is covered so a code added without a matching case -
+// which would otherwise silently fall through to the generic default and
+// go unnoticed - fails this test instead.
+func TestGetUserFriendlyMessageDefaultsByCode(t *testing.T) {
+	tests := []struct {
+		code ErrorCode
+		want string
+	}{
+		{ErrCodeInvalidInput, "Invalid input provided. Please check your request and try again."},
+		{ErrCodeInvalidFormat, "Invalid input provided. Please check your request and try again."},
+		{ErrCodeConstraintViolation, "Invalid input provided. Please check your request and try again."},
+		{ErrCodeMissingRequired, "Required field is missing."},
+		{ErrCodeUnauthorized, "Authentication required. Please log in."},
+		{ErrCodeTokenExpired, "Your session has expired. Please log in again."},
+		{ErrCodeTokenInvalid, "Invalid authentication token."},
+		{ErrCodePermissionDenied, "You don't have permission to access this resource."},
+		{ErrCodeNotFound, "The requested resource was not found."},
+		{ErrCodeAlreadyExists, "A resource with this identifier already exists."},
+		{ErrCodeResourceConflict, "The request conflicts with the current state of the resource."},
+		{ErrCodeRateLimitExceeded, "Too many requests. Please try again later."},
+		{ErrCodeQuotaExceeded, "You have exceeded your allotted quota."},
+		{ErrCodeExternalAPI, "External service is temporarily unavailable. Please try again later."},
+		{ErrCodeDatabaseConnection, "Database error occurred. Please try again."},
+		{ErrCodeDatabaseQuery, "Database error occurred. Please try again."},
+		{ErrCodeDatabaseTransaction, "Database error occurred. Please try again."},
+		{ErrCodeDatabaseMigration, "Database error occurred. Please try again."},
+		{ErrCodeInternal, "An internal error occurred. Please contact support if the problem persists."},
+		{ErrCodeNotImplemented, "This functionality is not yet implemented."},
+		{ErrorCode("SOMETHING_UNKNOWN"), "An unexpected error occurred."},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.code), func(t *testing.T) {
+			if got := getUserFriendlyMessage(tt.code, nil); got != tt.want {
+				t.Errorf("getUserFriendlyMessage(%q, nil) = %q, want %q", tt.code, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWriteHTTPErrorWithGenericConstructor(t *testing.T) {
 	t.Run("New reaches a previously unreachable code", func(t *testing.T) {
 		w := httptest.NewRecorder()
@@ -493,6 +536,36 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
 			t.Errorf("response_committed_status field = %v, want %v", logger.calls[0].fields["response_committed_status"], http.StatusOK)
+		}
+	})
+
+	t.Run("response committed via Write without WriteHeader is not appended to", func(t *testing.T) {
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// No explicit WriteHeader call - Write alone commits an
+			// implicit 200, same as the stdlib http.ResponseWriter.
+			_, _ = w.Write([]byte("partial"))
+			panic("boom after implicit 200")
+		}))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d (Write without WriteHeader implies 200)", w.Code, http.StatusOK)
+		}
+		if got, want := w.Body.String(), "partial"; got != want {
+			t.Errorf("body = %q, want %q (no error JSON should be appended to a committed response)", got, want)
+		}
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
+		}
+		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
+			t.Errorf("response_committed_status field = %v, want %v (Write alone should default the tracked status to 200)", logger.calls[0].fields["response_committed_status"], http.StatusOK)
 		}
 	})
 }
