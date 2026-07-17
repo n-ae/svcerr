@@ -73,3 +73,15 @@ jobs:
           version: v2.12.2
           working-directory: ${{ matrix.module }}
       - run: go test ./...
+      # Race lane (assessment 0010's outstanding CI item): continuously
+      # protects the global status registry (RegisterStatusCode's
+      # RWMutex-guarded map) and any future shared state, instead of
+      # relying on ad-hoc local -race runs at review time. Stable only,
+      # like formatting and lint: the floor cells exist to prove the
+      # module builds and passes at its declared minimum, and the newest
+      # toolchain carries the newest race runtime. -count=1 forces the
+      # tests to actually execute under the race runtime rather than
+      # letting a restored GOCACHE satisfy the run from a cached pass.
+      - name: Race detector
+        if: matrix.go == 'stable'
+        run: go test -race -count=1 ./...
