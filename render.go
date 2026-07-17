@@ -101,6 +101,27 @@ func checkedWrite(w http.ResponseWriter, body []byte) (int, error) {
 	return n, err
 }
 
+// finalizeErrorResponse performs the delivery steps every body writer
+// shares once the status and body bytes are decided: reset the
+// representation headers per policy, restore the classification-specific
+// headers, write the status, and deliver the body with short-write
+// detection. Retry-After is skipped when the body is a marshal-failure
+// fallback, since that response no longer represents err's own
+// classification; the WWW-Authenticate gate needs no such guard because
+// a fallback's 500 status already fails its 401 check. This sequence
+// exists once, here, because it demonstrably drifts when copied per
+// format - the v0.6.4 HTML Retry-After omission was exactly such a copy
+// missing one step.
+func finalizeErrorResponse(w http.ResponseWriter, contentType string, policy HeaderPolicy, statusCode int, node coderError, fallback bool, body []byte) (bytesWritten int, writeErr error) {
+	prepareErrorHeaders(w.Header(), contentType, policy)
+	if !fallback {
+		retryAfterHeader(w.Header(), node)
+	}
+	setAuthenticateChallenge(w.Header(), statusCode, node)
+	w.WriteHeader(statusCode)
+	return checkedWrite(w, body)
+}
+
 // writeJSONErrorBody writes err's JSON body and headers to w and returns
 // the status code used, without logging, plus the marshal error when the
 // real body couldn't be encoded and a generic fallback was substituted
@@ -134,18 +155,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 		renderErr = marshalErr
 	}
 
-	prepareErrorHeaders(w.Header(), "application/json", policy)
-
-	// Skipped on the marshal-failure fallback: that response no longer
-	// represents err's own classification.
-	if marshalErr == nil {
-		retryAfterHeader(w.Header(), node)
-	}
-
-	setAuthenticateChallenge(w.Header(), statusCode, node)
-
-	w.WriteHeader(statusCode)
-	bytesWritten, writeErr = checkedWrite(w, body)
+	bytesWritten, writeErr = finalizeErrorResponse(w, "application/json", policy, statusCode, node, marshalErr != nil, body)
 
 	return statusCode, bytesWritten, renderErr, writeErr
 }
@@ -191,17 +201,14 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 	message := getUserFriendlyMessage(code, err)
 	node := outermostCoded(err)
 
-	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8", policy)
-	retryAfterHeader(w.Header(), node)
-	setAuthenticateChallenge(w.Header(), statusCode, node)
-	w.WriteHeader(statusCode)
-
 	body := `<div class="error-message" role="alert">` +
 		`<h3>Error</h3>` +
 		`<p>` + html.EscapeString(message) + `</p>` +
 		`</div>`
 
-	bytesWritten, writeErr = checkedWrite(w, []byte(body))
+	// String concatenation can't fail to render, so HTML never has a
+	// fallback body - Retry-After always applies.
+	bytesWritten, writeErr = finalizeErrorResponse(w, "text/html; charset=utf-8", policy, statusCode, node, false, []byte(body))
 
 	return statusCode, bytesWritten, writeErr
 }
@@ -335,16 +342,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy)
 		renderErr = marshalErr
 	}
 
-	prepareErrorHeaders(w.Header(), "application/problem+json", policy)
-
-	if marshalErr == nil {
-		retryAfterHeader(w.Header(), node)
-	}
-
-	setAuthenticateChallenge(w.Header(), statusCode, node)
-
-	w.WriteHeader(statusCode)
-	bytesWritten, writeErr = checkedWrite(w, body)
+	bytesWritten, writeErr = finalizeErrorResponse(w, "application/problem+json", policy, statusCode, node, marshalErr != nil, body)
 
 	return statusCode, bytesWritten, renderErr, writeErr
 }
