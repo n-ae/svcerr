@@ -17,6 +17,19 @@
 // into a caller's build, not this package - this module has zero
 // dependencies of its own.)
 //
+// Classification of a joined error (errors.Join, or any tree whose
+// Unwrap returns []error) follows stdlib errors.As traversal order:
+// pre-order, depth-first, so the first coded error wins - for
+// errors.Join, the earliest coded argument. Join(notFoundErr,
+// internalErr) therefore classifies as NOT_FOUND/404 while
+// Join(internalErr, notFoundErr) classifies as INTERNAL_ERROR/500.
+// When aggregating errors of different severities (e.g. a client-facing
+// error with an operational cleanup failure), don't rely on argument
+// order - classify the aggregate explicitly:
+//
+//	return svcerr.Wrap(errors.Join(notFoundErr, cleanupErr),
+//		svcerr.ErrCodeInternal, "request processing failed")
+//
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
 // SetProblemTitle, SetAuthenticateChallenge, and RecaptureStackTrace all
@@ -276,9 +289,28 @@ func (e *BaseError) RemovePublicDetail(key string) {
 // PublicDetails returns the keys SetPublicDetail added or overrode, and
 // the keys RemovePublicDetail suppressed - the capability
 // extractErrorDetails needs to apply both on top of a built-in type's
-// automatic extraction.
+// automatic extraction. Both returned maps are shallow copies, the same
+// contract as Context(): adding or removing keys through them doesn't
+// reach back into the error - use SetPublicDetail/RemovePublicDetail,
+// which also keep the two maps' last-call-wins bookkeeping intact - but
+// an addition value that's itself a map, slice, or pointer is shared,
+// not copied.
 func (e *BaseError) PublicDetails() (add map[string]interface{}, remove map[string]struct{}) {
-	return e.publicDetailAdditions, e.publicDetailRemovals
+	// maps.Clone would do this, but it was added in Go 1.21 and this
+	// module's floor is Go 1.20.
+	if e.publicDetailAdditions != nil {
+		add = make(map[string]interface{}, len(e.publicDetailAdditions))
+		for k, v := range e.publicDetailAdditions {
+			add[k] = v
+		}
+	}
+	if e.publicDetailRemovals != nil {
+		remove = make(map[string]struct{}, len(e.publicDetailRemovals))
+		for k := range e.publicDetailRemovals {
+			remove[k] = struct{}{}
+		}
+	}
+	return add, remove
 }
 
 // SetProblemType overrides the RFC 9457 "type" URI WriteHTTPProblem sends
@@ -777,12 +809,15 @@ type RateLimitError struct {
 }
 
 // clampRetryAfter floors retryAfter at 0. RFC 9110 §10.2.3 defines
-// Retry-After as a non-negative delay-seconds (or an HTTP-date); a
-// negative value would go straight into the header via
-// fmt.Sprintf("%d", ...) with no downstream validation, so it's clamped
-// here, at construction, rather than left for the HTTP writer to catch -
-// that keeps the stored RetryAfter field and the "retry_after" context
-// entry consistent with what a caller actually sees on the wire.
+// Retry-After as a non-negative delay-seconds (or an HTTP-date), so a
+// negative value is never valid on the wire. It's applied twice: at
+// construction, so the stored RetryAfter field and the "retry_after"
+// context entry start out valid, and again at emission
+// (rateLimitRetryAfterHeader, extractErrorDetails, errorLogFields) -
+// RetryAfter is an exported, writable field, so the construction-time
+// clamp is input cleanup, not an enforced invariant, and a negative
+// value assigned after construction would otherwise go straight into the
+// header via fmt.Sprintf("%d", ...) with no downstream validation.
 func clampRetryAfter(retryAfter int) int {
 	if retryAfter < 0 {
 		return 0
@@ -888,7 +923,11 @@ type coderError interface {
 
 // outermostCoded returns the first error in err's chain that carries an
 // application ErrorCode - the same node GetErrorCode's return value comes
-// from. Callers that need type-specific data (a validation field, a
+// from. "First" is errors.As traversal order: pre-order, depth-first, so
+// for a joined error (errors.Join, or any Unwrap() []error tree) the
+// earliest coded child wins - see the package doc comment for why callers
+// aggregating errors of different severities should classify the
+// aggregate explicitly instead of relying on that order. Callers that need type-specific data (a validation field, a
 // retry-after value, a resource ID, ...) should derive it from this one
 // node rather than independently re-scanning the whole chain with their
 // own errors.As call. Otherwise an outer wrapper's code (e.g.

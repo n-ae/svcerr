@@ -1136,3 +1136,77 @@ type loggerFunc func(level Level, err error, fields map[string]interface{}, msg 
 func (f loggerFunc) Log(level Level, err error, fields map[string]interface{}, msg string) {
 	f(level, err, fields, msg)
 }
+
+// TestPublicDetailsReturnsCopies covers assessment v0.6.4/M2:
+// PublicDetails used to return the error's internal addition/removal maps
+// by reference, so a caller could mutate error state - injecting keys into
+// the next rendered response - without going through SetPublicDetail/
+// RemovePublicDetail, bypassing their last-call-wins bookkeeping and the
+// documented mutation surface. The maps must be shallow copies, matching
+// Context()'s contract.
+func TestPublicDetailsReturnsCopies(t *testing.T) {
+	t.Run("mutating the returned maps does not reach the error", func(t *testing.T) {
+		err := NewNotFoundError("widget", "42")
+		err.SetPublicDetail("field", "email")
+		err.RemovePublicDetail("resource_id")
+
+		add, remove := err.PublicDetails()
+		add["secret"] = "unexpectedly public"
+		delete(add, "field")
+		remove["resource_type"] = struct{}{}
+		delete(remove, "resource_id")
+
+		addAfter, removeAfter := err.PublicDetails()
+		if _, ok := addAfter["secret"]; ok {
+			t.Error(`addAfter["secret"] present - mutating the returned addition map reached the error's internal state`)
+		}
+		if addAfter["field"] != "email" {
+			t.Errorf(`addAfter["field"] = %v, want "email" - deleting from the returned map must not reach the error`, addAfter["field"])
+		}
+		if _, ok := removeAfter["resource_type"]; ok {
+			t.Error(`removeAfter["resource_type"] present - mutating the returned removal map reached the error's internal state`)
+		}
+		if _, ok := removeAfter["resource_id"]; !ok {
+			t.Error(`removeAfter["resource_id"] missing - deleting from the returned map must not reach the error`)
+		}
+	})
+
+	t.Run("nothing set returns nil maps", func(t *testing.T) {
+		err := NewNotFoundError("widget", "42")
+		add, remove := err.PublicDetails()
+		if add != nil || remove != nil {
+			t.Errorf("PublicDetails() = %v, %v, want nil, nil when nothing was set", add, remove)
+		}
+	})
+}
+
+// TestJoinedErrorClassificationIsChildOrderDependent pins the documented
+// (assessment v0.6.4/L1) errors.Join semantics: classification follows
+// errors.As pre-order, depth-first traversal, so the first coded child
+// wins and reversing errors.Join's arguments changes the response. Not a
+// recommendation - the package doc tells callers aggregating mixed
+// severities to classify the aggregate explicitly via Wrap - but the
+// traversal order is stdlib behavior this package inherits, and a change
+// in it should be caught, not discovered in production.
+func TestJoinedErrorClassificationIsChildOrderDependent(t *testing.T) {
+	notFound := NewNotFoundError("user", "123")
+	internal := NewInternalError("repository", "database failed")
+
+	if code := GetErrorCode(errors.Join(notFound, internal)); code != ErrCodeNotFound {
+		t.Errorf("GetErrorCode(Join(notFound, internal)) = %v, want %v (first coded child wins)", code, ErrCodeNotFound)
+	}
+	if code := GetErrorCode(errors.Join(internal, notFound)); code != ErrCodeInternal {
+		t.Errorf("GetErrorCode(Join(internal, notFound)) = %v, want %v (first coded child wins)", code, ErrCodeInternal)
+	}
+
+	// The documented idiom: explicit classification of the aggregate makes
+	// the child order irrelevant.
+	joined := errors.Join(notFound, internal)
+	wrapped := Wrap(joined, ErrCodeInternal, "request processing failed")
+	if code := GetErrorCode(wrapped); code != ErrCodeInternal {
+		t.Errorf("GetErrorCode(Wrap(joined, ErrCodeInternal, ...)) = %v, want %v", code, ErrCodeInternal)
+	}
+	if !errors.Is(wrapped, notFound) || !errors.Is(wrapped, internal) {
+		t.Error("explicit classification must preserve the joined children for errors.Is")
+	}
+}

@@ -1714,21 +1714,29 @@ func (w *panicOnInvalidStatusWriter) WriteHeader(status int) {
 	w.ResponseRecorder.WriteHeader(status)
 }
 
-func TestTrackingResponseWriterDoesNotRecordCommitmentWhenTheDelegateWriteHeaderPanics(t *testing.T) {
+func TestTrackingResponseWriterDoesNotRecordCommitmentWhenWriteHeaderPanicsOnAnInvalidStatus(t *testing.T) {
 	// Assessment 0008/L3: trackingResponseWriter.WriteHeader used to set
 	// wroteHeader/status BEFORE delegating, so an invalid status that made
 	// the real underlying WriteHeader panic (before anything reached the
-	// connection) was still falsely recorded as committed.
+	// connection) was still falsely recorded as committed. The tracker now
+	// validates the 100-999 range itself and panics pre-commitment (which
+	// is what lets it safely record commitment before delegating a valid
+	// status - see WriteHeader), so the invalid status must neither be
+	// recorded nor reach the underlying writer.
 	underlying := &panicOnInvalidStatusWriter{ResponseRecorder: httptest.NewRecorder()}
 	tw := &trackingResponseWriter{ResponseWriter: underlying}
 
+	panicked := false
 	func() {
-		defer func() { _ = recover() }()
+		defer func() { panicked = recover() != nil }()
 		tw.WriteHeader(99)
 	}()
 
+	if !panicked {
+		t.Error("WriteHeader(99) did not panic, want a panic matching net/http's own invalid-status behavior")
+	}
 	if tw.wroteHeader {
-		t.Error("tw.wroteHeader = true after the delegate WriteHeader panicked on an invalid status, want false - nothing actually reached the connection")
+		t.Error("tw.wroteHeader = true after WriteHeader panicked on an invalid status, want false - nothing actually reached the connection")
 	}
 }
 
@@ -2300,4 +2308,360 @@ func TestRecoveryMiddleware(t *testing.T) {
 			t.Error(`fields["response_write_error"] missing, want the write failure recorded before the abort`)
 		}
 	})
+}
+
+// TestRetryAfterMutatedAfterConstructionIsClampedAtEmission is the
+// regression test for assessment v0.6.4/M1: RateLimitError.RetryAfter is
+// an exported writable field, so the constructors' clampRetryAfter is only
+// input cleanup - a negative value assigned afterward used to reach the
+// wire verbatim (Retry-After: -9), violating RFC 9110 §10.2.3's
+// non-negative delay-seconds. Every emission path must re-clamp: the
+// header on all three renderings, the JSON/problem details, and the log
+// field, so they all agree.
+func TestRetryAfterMutatedAfterConstructionIsClampedAtEmission(t *testing.T) {
+	newMutated := func() *RateLimitError {
+		err := NewRateLimitError("api", 100, 30)
+		err.RetryAfter = -9
+		return err
+	}
+
+	t.Run("JSON header and details", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		WriteHTTPError(w, newMutated(), logger)
+
+		if got := w.Header().Get("Retry-After"); got != "0" {
+			t.Errorf("Retry-After = %q, want %q", got, "0")
+		}
+		var resp HTTPErrorResponse
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+		}
+		if resp.Error.Details["retry_after"] != float64(0) {
+			t.Errorf("Details[retry_after] = %v, want 0 (must match the clamped header)", resp.Error.Details["retry_after"])
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		if logger.calls[0].fields["retry_after"] != 0 {
+			t.Errorf(`log fields["retry_after"] = %v, want 0 (must match what the client was sent)`, logger.calls[0].fields["retry_after"])
+		}
+	})
+
+	t.Run("problem+json header and details", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		WriteProblem(w, newMutated())
+
+		if got := w.Header().Get("Retry-After"); got != "0" {
+			t.Errorf("Retry-After = %q, want %q", got, "0")
+		}
+		var resp map[string]interface{}
+		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+		}
+		if resp["retry_after"] != float64(0) {
+			t.Errorf(`resp["retry_after"] = %v, want 0`, resp["retry_after"])
+		}
+	})
+
+	t.Run("HTML header", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		WriteHTML(w, newMutated())
+
+		if got := w.Header().Get("Retry-After"); got != "0" {
+			t.Errorf("Retry-After = %q, want %q", got, "0")
+		}
+	})
+}
+
+func TestExternalAPIErrorNegativeRetryAfterIsClampedInDetails(t *testing.T) {
+	// ExternalAPIError.RetryAfter is documented for direct
+	// post-construction assignment, so no constructor ever vets it - the
+	// details projection is its only emission path and must clamp.
+	retryAfter := -5
+	err := NewExternalAPIError("yahoo", "yahoo API call failed", 503, "https://example.com")
+	err.RetryAfter = &retryAfter
+
+	w := httptest.NewRecorder()
+	WriteJSON(w, err)
+
+	var resp HTTPErrorResponse
+	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+	}
+	if resp.Error.Details["retry_after"] != float64(0) {
+		t.Errorf("Details[retry_after] = %v, want 0", resp.Error.Details["retry_after"])
+	}
+}
+
+// TestErrorLogFieldsCompleteness is the table-driven completeness test
+// assessment v0.6.4/L3 asked for: every built-in error type must
+// contribute its safe, type-specific diagnostic fields to the structured
+// log - and must NOT contribute the context values this package treats as
+// potentially sensitive (validation input, SQL text, external URLs).
+// Before this test, ConflictError, RateLimitError, and InternalError had
+// no errorLogFields case at all, so e.g. a 500 logged its stack trace but
+// not which component failed.
+func TestErrorLogFieldsCompleteness(t *testing.T) {
+	retryAfter := 30
+	externalErr := NewExternalAPIError("yahoo", "call failed", 503, "https://internal.example.com/upstream")
+	externalErr.RetryAfter = &retryAfter
+
+	cases := []struct {
+		name       string
+		err        error
+		wantFields map[string]interface{}
+		wantAbsent []string
+	}{
+		{
+			name:       "ValidationError",
+			err:        NewValidationError("bad email", "email", "secret-input"),
+			wantFields: map[string]interface{}{"field": "email"},
+			wantAbsent: []string{"value"}, // caller input; may be a password or token
+		},
+		{
+			name:       "DatabaseError",
+			err:        WrapDatabaseError(stdlibError("dup key"), "insert", "INSERT INTO users ..."),
+			wantFields: map[string]interface{}{"db_operation": "insert"},
+			wantAbsent: []string{"query"}, // raw SQL text
+		},
+		{
+			name:       "ExternalAPIError",
+			err:        externalErr,
+			wantFields: map[string]interface{}{"service": "yahoo", "service_status": 503},
+			wantAbsent: []string{"url"}, // internal topology
+		},
+		{
+			name:       "AuthenticationError",
+			err:        NewAuthenticationError("token_expired", "session expired"),
+			wantFields: map[string]interface{}{"auth_reason": "token_expired"},
+		},
+		{
+			name:       "NotFoundError",
+			err:        NewNotFoundError("league", "12345"),
+			wantFields: map[string]interface{}{"resource_type": "league", "resource_id": "12345"},
+		},
+		{
+			name:       "ConflictError",
+			err:        NewConflictError("user", "email", "user already exists"),
+			wantFields: map[string]interface{}{"resource_type": "user", "conflict_key": "email"},
+		},
+		{
+			name:       "RateLimitError",
+			err:        NewRateLimitError("api", 100, 30),
+			wantFields: map[string]interface{}{"service": "api", "limit": 100, "retry_after": 30},
+		},
+		{
+			name:       "InternalError",
+			err:        NewInternalError("billing", "charge failed"),
+			wantFields: map[string]interface{}{"component": "billing"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			statusCode := HTTPStatusCode(GetErrorCode(tc.err))
+			_, fields := errorLogFields(tc.err, statusCode)
+
+			for k, want := range tc.wantFields {
+				got, ok := fields[k]
+				if !ok {
+					t.Errorf("fields[%q] missing, want %v", k, want)
+					continue
+				}
+				if got != want {
+					t.Errorf("fields[%q] = %v, want %v", k, got, want)
+				}
+			}
+			for _, k := range tc.wantAbsent {
+				if v, ok := fields[k]; ok {
+					t.Errorf("fields[%q] = %v, want absent - this value is potentially sensitive", k, v)
+				}
+			}
+		})
+	}
+}
+
+// TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions covers
+// assessment v0.6.4/L4: RFC 9457 §3.2 extension members live alongside
+// the registered members, they can't replace them - and §3.1 obliges
+// consumers to ignore a registered member with the wrong value type, so
+// letting an extension named "instance" carry e.g. an int produced output
+// that was syntactically valid JSON but semantically unusable.
+func TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions(t *testing.T) {
+	t.Run("direct marshal drops every reserved extension name", func(t *testing.T) {
+		p := ProblemDetails{
+			Type:   "about:blank",
+			Title:  "Not Found",
+			Status: 404,
+			Detail: "widget not found",
+			Code:   ErrCodeNotFound,
+			Extensions: map[string]interface{}{
+				"type":     "https://evil.example/override",
+				"title":    "Overridden",
+				"status":   999,
+				"detail":   "overridden detail",
+				"instance": 123, // the concrete reproduction: a non-URI value in a registered slot
+				"code":     "OVERRIDDEN",
+				"kept":     "extension values with unreserved names still flatten",
+			},
+		}
+
+		body, marshalErr := json.Marshal(p)
+		if marshalErr != nil {
+			t.Fatalf("marshal failed: %v", marshalErr)
+		}
+		var out map[string]interface{}
+		if decErr := json.Unmarshal(body, &out); decErr != nil {
+			t.Fatalf("round-trip failed: %v", decErr)
+		}
+
+		if out["type"] != "about:blank" {
+			t.Errorf(`out["type"] = %v, want the typed field, not the extension`, out["type"])
+		}
+		if out["title"] != "Not Found" {
+			t.Errorf(`out["title"] = %v, want the typed field`, out["title"])
+		}
+		if out["status"] != float64(404) {
+			t.Errorf(`out["status"] = %v, want 404`, out["status"])
+		}
+		if out["detail"] != "widget not found" {
+			t.Errorf(`out["detail"] = %v, want the typed field`, out["detail"])
+		}
+		if v, ok := out["instance"]; ok {
+			t.Errorf(`out["instance"] = %v, want omitted - the typed field is empty and the extension must not take its place`, v)
+		}
+		if out["code"] != string(ErrCodeNotFound) {
+			t.Errorf(`out["code"] = %v, want %v`, out["code"], ErrCodeNotFound)
+		}
+		if out["kept"] != "extension values with unreserved names still flatten" {
+			t.Errorf(`out["kept"] = %v, want the extension preserved`, out["kept"])
+		}
+	})
+
+	t.Run("SetPublicDetail cannot occupy a reserved member through WriteProblem", func(t *testing.T) {
+		err := NewNotFoundError("widget", "42")
+		err.SetPublicDetail("instance", 123)
+		err.SetPublicDetail("status", "not-a-status")
+
+		w := httptest.NewRecorder()
+		WriteProblem(w, err)
+
+		var out map[string]interface{}
+		if decErr := json.Unmarshal(w.Body.Bytes(), &out); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
+		}
+		if v, ok := out["instance"]; ok {
+			t.Errorf(`out["instance"] = %v, want omitted (no SetProblemInstance was called; use SetProblemInstance, not SetPublicDetail, for the registered member)`, v)
+		}
+		if out["status"] != float64(404) {
+			t.Errorf(`out["status"] = %v, want 404`, out["status"])
+		}
+		if out["resource_id"] != "42" {
+			t.Errorf(`out["resource_id"] = %v, want the ordinary extension preserved`, out["resource_id"])
+		}
+	})
+
+	t.Run("SetProblemInstance still populates the registered member", func(t *testing.T) {
+		err := NewNotFoundError("widget", "42")
+		err.SetProblemInstance("https://example.com/requests/abc123")
+
+		w := httptest.NewRecorder()
+		WriteProblem(w, err)
+
+		var out map[string]interface{}
+		if decErr := json.Unmarshal(w.Body.Bytes(), &out); decErr != nil {
+			t.Fatalf("body is not valid JSON: %v", decErr)
+		}
+		if out["instance"] != "https://example.com/requests/abc123" {
+			t.Errorf(`out["instance"] = %v, want the SetProblemInstance value`, out["instance"])
+		}
+	})
+}
+
+// commitThenPanicWriter commits the delegated status to its underlying
+// writer and then panics - once. It models an intermediate writer sitting
+// between RecoveryMiddleware and the transport (a metrics or logging
+// wrapper, say) whose post-delegation code has a bug that fires on the
+// first response. Panicking only once matters: recovery's own follow-up
+// write must be observable, which an always-panicking writer would mask by
+// re-panicking out of the recovery path itself.
+type commitThenPanicWriter struct {
+	http.ResponseWriter
+	panicked bool
+}
+
+func (w *commitThenPanicWriter) WriteHeader(status int) {
+	w.ResponseWriter.WriteHeader(status) // the status is now on the wire
+	if !w.panicked {
+		w.panicked = true
+		panic("metrics middleware failed")
+	}
+}
+
+func TestTrackingResponseWriterRecordsCommitmentBeforeDelegating(t *testing.T) {
+	// Assessment v0.6.4/L2: WriteHeader used to record commitment only
+	// after the delegate call returned, so a delegated WriteHeader that
+	// committed downstream and then panicked left the response looking
+	// uncommitted - and RecoveryMiddleware then wrote a second error
+	// document onto a status and headers already sent (the client saw a
+	// 200 with an INTERNAL_ERROR body appended). Recording before
+	// delegating means recovery now sees the response as committed and
+	// takes the safe branch: log, then abort the connection.
+	rec := httptest.NewRecorder()
+	inner := &commitThenPanicWriter{ResponseWriter: rec}
+	logger := &recordingLogger{}
+
+	handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	expectAbortHandler(t, handler, inner, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("rec.Code = %d, want %d (the delegate really committed before panicking)", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); body != "" {
+		t.Errorf("body = %q, want empty - recovery must not append an error document to a committed response", body)
+	}
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+	}
+	if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+		t.Errorf("log msg = %q, want the already-committed variant", logger.calls[0].msg)
+	}
+	if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
+		t.Errorf(`fields["response_committed_status"] = %v, want %d`, logger.calls[0].fields["response_committed_status"], http.StatusOK)
+	}
+}
+
+func TestTrackingResponseWriterPanicsItselfOnAnInvalidStatus(t *testing.T) {
+	// The counterpart that makes record-before-delegate safe: statuses
+	// outside net/http's accepted 100-999 range panic in the tracker's own
+	// validation, before commitment is recorded and before anything can
+	// reach the underlying writer - so an invalid status stays recoverable
+	// even when the underlying writer performs no validation of its own
+	// (httptest.ResponseRecorder here accepts anything).
+	rec := httptest.NewRecorder()
+	tw := &trackingResponseWriter{ResponseWriter: rec}
+
+	for _, status := range []int{0, 99, 1000, -1} {
+		panicked := false
+		func() {
+			defer func() { panicked = recover() != nil }()
+			tw.WriteHeader(status)
+		}()
+
+		if !panicked {
+			t.Errorf("WriteHeader(%d) did not panic, want a panic matching net/http's own validation", status)
+		}
+		if tw.wroteHeader {
+			t.Errorf("tw.wroteHeader = true after WriteHeader(%d) panicked, want false", status)
+		}
+	}
+	// httptest.NewRecorder reports 200 until a status is written; anything
+	// else means an invalid status leaked through to the underlying writer.
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Errorf("underlying writer was touched by an invalid status: Code=%d Body=%q", rec.Code, rec.Body.String())
+	}
 }

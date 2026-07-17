@@ -270,12 +270,20 @@ func prepareErrorHeaders(h http.Header, contentType string) {
 // rateLimitRetryAfterHeader sets Retry-After when node (the same
 // outermost-coded node used for everything else in err's classification)
 // is a *RateLimitError, so an outer wrapper's code can't inherit a wrapped
-// RateLimitError's header. Shared by the JSON and problem+json writers;
-// skipped on the marshal-failure fallback by its callers, since that
-// response no longer represents err's own classification.
+// RateLimitError's header. Shared by all three response writers; skipped
+// on the marshal-failure fallback by the JSON/problem+json callers, since
+// that response no longer represents err's own classification.
+//
+// RetryAfter is re-clamped here, at the wire boundary, because it's an
+// exported writable field: the constructors' clampRetryAfter is only
+// input cleanup, and a negative value assigned after construction would
+// otherwise become an invalid Retry-After (RFC 9110 §10.2.3 requires a
+// non-negative delay-seconds). extractErrorDetails and errorLogFields
+// clamp the same way, so the header, the JSON details, and the log field
+// always agree.
 func rateLimitRetryAfterHeader(h http.Header, node coderError) {
 	if rle, ok := node.(*RateLimitError); ok {
-		h.Set("Retry-After", fmt.Sprintf("%d", rle.RetryAfter))
+		h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(rle.RetryAfter)))
 	}
 }
 
@@ -370,11 +378,33 @@ type ProblemDetails struct {
 	Extensions map[string]interface{} // additional extension members (e.g. resource_id, field)
 }
 
+// reservedProblemMembers are the member names MarshalJSON owns: the RFC
+// 9457 §3.1 registered members plus this package's own "code" extension.
+// An Extensions entry with one of these names is dropped rather than
+// flattened - extension members live alongside the registered ones (RFC
+// 9457 §3.2), they can't replace them. That matters even for the optional
+// members omitted when empty: without the reservation, an extension named
+// "instance" (e.g. via SetPublicDetail) could occupy the registered slot
+// with a non-URI value that §3.1 obliges consumers to ignore.
+var reservedProblemMembers = map[string]struct{}{
+	"type":     {},
+	"title":    {},
+	"status":   {},
+	"detail":   {},
+	"instance": {},
+	"code":     {},
+}
+
 // MarshalJSON flattens Extensions into the top-level object rather than
 // nesting them under a sub-object, per RFC 9457's extension-member model.
+// Extension entries named after a registered member (or "code") are
+// dropped - see reservedProblemMembers.
 func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 	out := make(map[string]interface{}, len(p.Extensions)+5)
 	for k, v := range p.Extensions {
+		if _, reserved := reservedProblemMembers[k]; reserved {
+			continue
+		}
 		out[k] = v
 	}
 	out["type"] = p.Type
@@ -567,10 +597,11 @@ func getUserFriendlyMessage(code ErrorCode, err error) string {
 }
 
 // defaultMessageForCode returns the generic, occurrence-invariant
-// client-facing message for code - used both as getUserFriendlyMessage's
-// fallback and as the RFC 9457 "title" member in WriteHTTPProblem, which
-// (per RFC 9457) should describe the general problem type rather than one
-// specific occurrence of it.
+// client-facing message for code - getUserFriendlyMessage's fallback when
+// an error's own message can't be shown, and the whole body of
+// fallbackErrorBody's always-encodable substitute. (WriteHTTPProblem's
+// RFC 9457 "title" member is not this: it's http.StatusText(status), or a
+// ProblemTitler override - see writeProblemJSONBody.)
 func defaultMessageForCode(code ErrorCode) string {
 	switch code {
 	case ErrCodeInvalidInput, ErrCodeInvalidFormat, ErrCodeConstraintViolation:
@@ -634,7 +665,10 @@ func extractErrorDetails(err error) map[string]interface{} {
 			details["status_code"] = v.StatusCode
 		}
 		if v.RetryAfter != nil {
-			details["retry_after"] = *v.RetryAfter
+			// Clamped like RateLimitError's: this field is documented for
+			// direct post-construction assignment, so no constructor ever
+			// vetted it.
+			details["retry_after"] = clampRetryAfter(*v.RetryAfter)
 		}
 	case *NotFoundError:
 		details["resource_type"] = v.ResourceType
@@ -643,7 +677,8 @@ func extractErrorDetails(err error) map[string]interface{} {
 		}
 	case *RateLimitError:
 		details["limit"] = v.Limit
-		details["retry_after"] = v.RetryAfter
+		// Re-clamped at emission - see rateLimitRetryAfterHeader.
+		details["retry_after"] = clampRetryAfter(v.RetryAfter)
 	}
 
 	// SetPublicDetail/RemovePublicDetail overrides, from the same
@@ -716,6 +751,17 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 	case *NotFoundError:
 		fields["resource_type"] = v.ResourceType
 		fields["resource_id"] = v.ResourceID
+	case *ConflictError:
+		fields["resource_type"] = v.ResourceType
+		fields["conflict_key"] = v.ConflictKey
+	case *RateLimitError:
+		fields["service"] = v.Service
+		fields["limit"] = v.Limit
+		// Clamped to match what the response writers actually sent - see
+		// rateLimitRetryAfterHeader.
+		fields["retry_after"] = clampRetryAfter(v.RetryAfter)
+	case *InternalError:
+		fields["component"] = v.Component
 	}
 
 	return level, fields
@@ -793,6 +839,18 @@ type trackingResponseWriter struct {
 }
 
 func (w *trackingResponseWriter) WriteHeader(status int) {
+	// Validate the status here, before recording or delegating anything -
+	// the same 100-999 range net/http's own checkWriteHeaderCode accepts.
+	// Panicking pre-commitment keeps an invalid status recoverable:
+	// nothing reached the connection, so RecoveryMiddleware's recovery can
+	// still take its "uncommitted" branch and write a real, valid error
+	// response. Before this validation existed, the same outcome depended
+	// on delegating first and letting the underlying writer's own
+	// validation panic - which forced commitment to be recorded after the
+	// delegate call returned, leaving the opposite gap described below.
+	if status < 100 || status > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", status))
+	}
 	// Informational (1xx) responses aren't the final response - net/http
 	// allows any number of them before the one commit-worthy final
 	// status ("unlike other response headers, informational headers may
@@ -802,25 +860,31 @@ func (w *trackingResponseWriter) WriteHeader(status int) {
 	// Switching Protocols is the exception: it's a protocol transition,
 	// not an informational preamble, and no further HTTP response
 	// follows on the connection.
-	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+	if status < 200 && status != http.StatusSwitchingProtocols {
 		w.ResponseWriter.WriteHeader(status)
 		return
 	}
 	if w.wroteHeader {
 		return
 	}
-	// Delegate before recording commitment, not after: a real net/http
-	// writer (and any writer with equivalent validation) panics on a
-	// status outside its accepted three-digit range before anything
-	// reaches the connection. Recording commitment first would falsely
-	// mark the response committed even though nothing was actually sent,
-	// sending RecoveryMiddleware's panic recovery down the "already
-	// committed" branch (log, then abort the connection) instead of the
-	// "uncommitted" branch, which could still write a real, valid error
-	// response since nothing preceded it on the wire.
-	w.ResponseWriter.WriteHeader(status)
+	// Record commitment before delegating, conservatively assuming a
+	// valid delegated call may commit before panicking: an intermediate
+	// writer sitting between RecoveryMiddleware and the transport whose
+	// WriteHeader delegates downstream and then panics (a buggy metrics
+	// wrapper, say) never returns here, so recording afterward would
+	// leave the response looking uncommitted and let recovery write a
+	// second error document onto a status and headers already sent. The
+	// cost is the opposite, rarer case: a delegate that panics on a valid
+	// status without committing anything is now treated as committed, so
+	// recovery aborts the connection (http.ErrAbortHandler) instead of
+	// writing a clean 500. Aborting a connection the client can retry is
+	// strictly safer than corrupting a response that may already be on
+	// the wire, so the conservative direction wins. Statuses a real
+	// writer rejects don't pay this cost - they panic in the validation
+	// above, before commitment is recorded.
 	w.wroteHeader = true
 	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *trackingResponseWriter) Write(b []byte) (int, error) {

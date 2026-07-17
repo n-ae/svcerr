@@ -188,8 +188,9 @@ abandoned success path rather than being the request's only response.
 `NotFoundError`, `ConflictError`, `RateLimitError`, `InternalError` — each
 has a `New*`/`Wrap*` constructor, carries an `ErrorCode`, and supports
 stdlib `errors.Is`/`errors.As`/`errors.Unwrap` in the usual way. See the
-package doc comment in [`errors.go`](errors.go) for the full list of codes
-and their HTTP status mapping.
+`ErrorCode` constants in [`errors.go`](errors.go) for the full list of
+codes and `HTTPStatusCode` in [`http.go`](http.go) for their HTTP status
+mapping.
 
 For a code with no dedicated constructor (e.g. `ErrCodeDatabaseConnection`,
 `ErrCodeMissingRequired`, `ErrCodeResourceConflict`, `ErrCodeQuotaExceeded`),
@@ -228,6 +229,27 @@ are client-safe - so pair custom codes with `SetPublicMessage`:
 ```go
 err := svcerr.New(ErrCodeOutOfStock, "sku WIDGET-42 depleted, restock ETA unknown")
 err.SetPublicMessage("This item is out of stock.")
+```
+
+### Joined errors
+
+Classification follows stdlib `errors.As` traversal order - pre-order,
+depth-first - so for a joined error (`errors.Join`, or any tree whose
+`Unwrap` returns `[]error`) the **first** coded error wins:
+
+```go
+svcerr.GetErrorCode(errors.Join(notFoundErr, internalErr)) // NOT_FOUND  -> 404
+svcerr.GetErrorCode(errors.Join(internalErr, notFoundErr)) // INTERNAL_ERROR -> 500
+```
+
+Merely reversing the arguments changes the client's response. When
+aggregating errors of different severities - a client-facing error joined
+with an operational cleanup failure, say - don't rely on argument order;
+classify the aggregate explicitly:
+
+```go
+return svcerr.Wrap(errors.Join(notFoundErr, cleanupErr),
+	svcerr.ErrCodeInternal, "request processing failed")
 ```
 
 ### Custom error types
