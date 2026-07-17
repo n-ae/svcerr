@@ -545,6 +545,26 @@ func TestWriteHTTPErrorHTML(t *testing.T) {
 	}
 }
 
+func TestWriteHTTPErrorHTMLSetsRetryAfterHeader(t *testing.T) {
+	// Assessment 0008/L4: writeHTMLErrorBody never called
+	// rateLimitRetryAfterHeader, so HTML 429 responses silently dropped
+	// Retry-After that WriteHTTPError/WriteHTTPProblem both preserve for
+	// the identical error (see "rate limit error sets Retry-After header"
+	// above and in TestWriteHTTPProblem).
+	w := httptest.NewRecorder()
+	logger := &recordingLogger{}
+	err := NewRateLimitError("yahoo", 300, 60)
+
+	WriteHTTPErrorHTML(w, err, logger)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+	if got := w.Header().Get("Retry-After"); got != "60" {
+		t.Errorf("Retry-After = %q, want 60", got)
+	}
+}
+
 func TestWriteHTTPErrorHTMLLogsWriteFailure(t *testing.T) {
 	w := &failingWriter{}
 	logger := &recordingLogger{}
@@ -1623,6 +1643,74 @@ func TestTrackingResponseWriterInformationalHeaderIsNotCommitment(t *testing.T) 
 	tw.WriteHeader(http.StatusOK)
 	if !tw.wroteHeader || tw.status != http.StatusOK {
 		t.Errorf("wroteHeader=%v status=%d after a real final WriteHeader, want true/%d", tw.wroteHeader, tw.status, http.StatusOK)
+	}
+}
+
+// panicOnInvalidStatusWriter mimics net/http's own WriteHeader validation
+// (net/http.checkWriteHeaderCode): it panics before writing anything if
+// status is outside the accepted three-digit range, the same way a real
+// connection does. Used to verify trackingResponseWriter doesn't record
+// commitment for a WriteHeader call that never actually reached the
+// connection.
+type panicOnInvalidStatusWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (w *panicOnInvalidStatusWriter) WriteHeader(status int) {
+	if status < 100 || status > 999 {
+		panic(fmt.Sprintf("invalid WriteHeader code %v", status))
+	}
+	w.ResponseRecorder.WriteHeader(status)
+}
+
+func TestTrackingResponseWriterDoesNotRecordCommitmentWhenTheDelegateWriteHeaderPanics(t *testing.T) {
+	// Assessment 0008/L3: trackingResponseWriter.WriteHeader used to set
+	// wroteHeader/status BEFORE delegating, so an invalid status that made
+	// the real underlying WriteHeader panic (before anything reached the
+	// connection) was still falsely recorded as committed.
+	underlying := &panicOnInvalidStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+	tw := &trackingResponseWriter{ResponseWriter: underlying}
+
+	func() {
+		defer func() { _ = recover() }()
+		tw.WriteHeader(99)
+	}()
+
+	if tw.wroteHeader {
+		t.Error("tw.wroteHeader = true after the delegate WriteHeader panicked on an invalid status, want false - nothing actually reached the connection")
+	}
+}
+
+func TestRecoveryMiddlewareWritesARealErrorResponseAfterAnInvalidStatusPanic(t *testing.T) {
+	// End-to-end companion to the direct trackingResponseWriter test above:
+	// before the fix, RecoveryMiddleware's deferred function saw
+	// tw.wroteHeader falsely set to true and took the already-committed
+	// branch (log, then abort the connection with http.ErrAbortHandler)
+	// instead of writing the real, valid 500 response that was still safe
+	// to send, since nothing had actually reached the connection yet.
+	logger := &recordingLogger{}
+	underlying := &panicOnInvalidStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+	handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(99) // invalid; a real net/http writer panics here before anything is sent
+	}))
+
+	handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if underlying.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d (a real error response - nothing had actually reached the connection before the panic)", underlying.Code, http.StatusInternalServerError)
+	}
+	var resp HTTPErrorResponse
+	if jsonErr := json.Unmarshal(underlying.Body.Bytes(), &resp); jsonErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %s)", jsonErr, underlying.Body.String())
+	}
+	if resp.Error.Code != ErrCodeInternal {
+		t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+	}
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+	}
+	if logger.calls[0].msg != "Panic recovered in HTTP handler" {
+		t.Errorf("log msg = %q, want the normal (uncommitted) variant, not the already-committed one", logger.calls[0].msg)
 	}
 }
 

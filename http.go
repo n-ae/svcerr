@@ -316,9 +316,11 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error) (statusCode int, write
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
+	node := outermostCoded(err)
 
 	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8")
-	setAuthenticateChallenge(w.Header(), statusCode, outermostCoded(err))
+	rateLimitRetryAfterHeader(w.Header(), node)
+	setAuthenticateChallenge(w.Header(), statusCode, node)
 	w.WriteHeader(statusCode)
 
 	body := `<div class="error-message" role="alert">` +
@@ -785,9 +787,18 @@ func (w *trackingResponseWriter) WriteHeader(status int) {
 	if w.wroteHeader {
 		return
 	}
+	// Delegate before recording commitment, not after: a real net/http
+	// writer (and any writer with equivalent validation) panics on a
+	// status outside its accepted three-digit range before anything
+	// reaches the connection. Recording commitment first would falsely
+	// mark the response committed even though nothing was actually sent,
+	// sending RecoveryMiddleware's panic recovery down the "already
+	// committed" branch (log, then abort the connection) instead of the
+	// "uncommitted" branch, which could still write a real, valid error
+	// response since nothing preceded it on the wire.
+	w.ResponseWriter.WriteHeader(status)
 	w.wroteHeader = true
 	w.status = status
-	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *trackingResponseWriter) Write(b []byte) (int, error) {
