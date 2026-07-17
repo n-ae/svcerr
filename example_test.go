@@ -152,6 +152,28 @@ func ExampleRegisterStatusCode() {
 	// {"error":{"code":"OUT_OF_STOCK","message":"This item is out of stock."}}
 }
 
+// A deployment whose ResponseWriter is wrapped by a transparent
+// compression middleware - one that sets Content-Encoding once and gzips
+// everything written through it - declares that header live rather than
+// stale, so error bodies written through the wrapper stay correctly
+// labeled. RecoveryMiddleware's panic replacement has its own separate
+// policy (SetRecoveryHeaderPolicy), since it writes underneath any such
+// middleware. (The deferred reset only isolates this example; real
+// applications set the policy once at startup.)
+func ExampleSetHeaderPolicy() {
+	svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{KeepContentEncoding: true})
+	defer svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{})
+
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Encoding", "gzip") // set by the compression wrapper
+
+	svcerr.WriteJSON(rec, svcerr.NewNotFoundError("league", "12345"))
+
+	fmt.Println(rec.Header().Get("Content-Encoding"))
+	// Output:
+	// gzip
+}
+
 // An application-wide default WWW-Authenticate challenge, configured once
 // at startup, covers every 401 whose error doesn't carry its own via
 // SetAuthenticateChallenge - RFC 9110 §11.6.1 requires a challenge on

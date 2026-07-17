@@ -137,7 +137,7 @@ type WriteResult struct {
 
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err)
+	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
 	logError(logger, err, statusCode, renderErr, writeErr)
 }
 
@@ -157,7 +157,7 @@ func WriteJSON(w http.ResponseWriter, err error) int {
 // caller, or report the failure through its own error-tracking system
 // instead of this package's Logger contract.
 func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err)
+	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
 	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
 }
 
@@ -185,7 +185,7 @@ func checkedWrite(w http.ResponseWriter, body []byte) error {
 // WriteHTTPError's case). Split out of WriteHTTPError so RecoveryMiddleware
 // can write the response and log the panic as a single record instead of
 // the response write and the log call each logging independently.
-func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, renderErr, writeErr error) {
+func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -210,7 +210,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 		renderErr = marshalErr
 	}
 
-	prepareErrorHeaders(w.Header(), "application/json")
+	prepareErrorHeaders(w.Header(), "application/json", policy)
 
 	// Skipped on the marshal-failure fallback: that response no longer
 	// represents err's own classification.
@@ -226,6 +226,96 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 	return statusCode, renderErr, writeErr
 }
 
+// HeaderPolicy configures how this package's response writers treat
+// representation headers a handler (or a wrapping middleware) already set
+// before the error body is written. The zero value is the long-standing
+// default behavior: Content-Encoding is cleared, validators are kept.
+// Field polarities follow from that - each false value must mean "what
+// the package always did".
+type HeaderPolicy struct {
+	// KeepContentEncoding preserves a pre-existing Content-Encoding
+	// header instead of deleting it. By default it's deleted because the
+	// body these writers produce is always plain, uncompressed text - a
+	// stale "gzip" left by a handler that never got to write its
+	// compressed body would make clients gzip-decode plain JSON. Set this
+	// when the ResponseWriter these writers receive belongs to a
+	// transparent compression middleware that sets the header once and
+	// compresses everything written through it: there the header is live,
+	// not stale, and deleting it mislabels a genuinely compressed body as
+	// plain text (see the README's compression-ordering section).
+	KeepContentEncoding bool
+	// ClearValidators additionally deletes ETag, Last-Modified, and
+	// Accept-Ranges. By default they're kept: they describe the specific
+	// successful representation this error response isn't attempting to
+	// be, but - unlike a wrong Content-Length or Content-Encoding - a
+	// stale conditional-request header doesn't actively mislead a client
+	// about the body it's receiving, and a plain WriteJSON call may
+	// legitimately want handler-set headers preserved. Set this for
+	// deployments that would rather no abandoned-representation metadata
+	// ever ride along on an error response.
+	ClearValidators bool
+}
+
+var (
+	headerPolicyMu sync.RWMutex
+	// errorHeaderPolicy applies to the normal error path: WriteHTTPError/
+	// WriteHTTPErrorHTML/WriteHTTPProblem and the WriteJSON/WriteHTML/
+	// WriteProblem variants, i.e. an error body a handler writes on
+	// purpose, usually into the exact ResponseWriter (compression wrappers
+	// included) it would have written its success body into.
+	errorHeaderPolicy HeaderPolicy
+	// recoveryHeaderPolicy applies to RecoveryMiddleware's panic
+	// replacement, which is written to the writer recovery itself wraps -
+	// bypassing any middleware sitting between recovery and the handler.
+	// The same deployment can genuinely need different answers for the
+	// two paths: with a compression middleware inside recovery, a
+	// handler's own WriteJSON goes through the compressor (its
+	// Content-Encoding is live - keep it), while a panic replacement does
+	// not (the same header is stale - clear it).
+	recoveryHeaderPolicy HeaderPolicy
+)
+
+// SetHeaderPolicy sets the HeaderPolicy for the normal error path -
+// WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem and the WriteJSON/
+// WriteHTML/WriteProblem variants. It does not affect RecoveryMiddleware's
+// panic replacement; see SetRecoveryHeaderPolicy. Set it once at startup,
+// like RegisterStatusCode; the zero value restores the default behavior.
+// Safe for concurrent use.
+func SetHeaderPolicy(p HeaderPolicy) {
+	headerPolicyMu.Lock()
+	errorHeaderPolicy = p
+	headerPolicyMu.Unlock()
+}
+
+// SetRecoveryHeaderPolicy sets the HeaderPolicy for RecoveryMiddleware's
+// panic-replacement response. Separate from SetHeaderPolicy because the
+// two paths write to different points in the middleware stack: a normal
+// error body goes through whatever wraps the handler's ResponseWriter
+// (e.g. a compression middleware, whose Content-Encoding is then live),
+// while a panic replacement is written to the writer recovery wraps
+// directly, underneath any such middleware (the same header is then
+// stale). Set it once at startup; the zero value restores the default
+// behavior. Safe for concurrent use.
+func SetRecoveryHeaderPolicy(p HeaderPolicy) {
+	headerPolicyMu.Lock()
+	recoveryHeaderPolicy = p
+	headerPolicyMu.Unlock()
+}
+
+// currentHeaderPolicy returns the policy for the normal error path.
+func currentHeaderPolicy() HeaderPolicy {
+	headerPolicyMu.RLock()
+	defer headerPolicyMu.RUnlock()
+	return errorHeaderPolicy
+}
+
+// currentRecoveryHeaderPolicy returns the policy for the panic path.
+func currentRecoveryHeaderPolicy() HeaderPolicy {
+	headerPolicyMu.RLock()
+	defer headerPolicyMu.RUnlock()
+	return recoveryHeaderPolicy
+}
+
 // prepareErrorHeaders resets the response headers this package's writers
 // need to be correct, in case the handler already set headers expecting a
 // successful response before panicking or returning an error - net/http's
@@ -235,13 +325,12 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 // value can cause client-side truncation or a real server's
 // ResponseWriter to reject or truncate the write. Trailer is deleted
 // because any trailers it announced won't be sent, since this response
-// has none. Content-Encoding is deleted because the body these writers
-// produce is always plain, uncompressed text - a handler that set it
-// while planning to write compressed bytes itself (rather than relying on
-// an outer compression middleware that transparently wraps the
-// ResponseWriter and sets the header itself after compressing whatever's
-// written) would otherwise leave clients trying to gzip-decode a body
-// that was never actually compressed.
+// has none. Content-Encoding is deleted (unless policy.KeepContentEncoding
+// opts out, for transparent-compression deployments - see HeaderPolicy)
+// because the body these writers produce is always plain, uncompressed
+// text - a handler that set it while planning to write compressed bytes
+// itself would otherwise leave clients trying to gzip-decode a body that
+// was never actually compressed.
 //
 // Retry-After and WWW-Authenticate are deleted for the same reason as
 // Content-Length: both describe the specific response this call is
@@ -251,18 +340,28 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 // took over. Every caller of prepareErrorHeaders re-adds Retry-After
 // (rateLimitRetryAfterHeader) or WWW-Authenticate (setAuthenticateChallenge)
 // immediately afterward when err's own classification actually calls for
-// it, so a genuinely-applicable value is never lost.
+// it, so a genuinely-applicable value is never lost. Neither deletion is
+// policy-controlled: unlike Content-Encoding, there's no middleware
+// topology in which a pre-existing value is live for this response.
 //
-// This still deliberately doesn't touch ETag, Last-Modified, or
-// Accept-Ranges - those describe a specific successful representation
-// this response isn't attempting to be, but aren't actively misleading
-// the way a wrong Content-Length or Content-Encoding is.
-func prepareErrorHeaders(h http.Header, contentType string) {
+// ETag, Last-Modified, and Accept-Ranges are kept by default - those
+// describe a specific successful representation this response isn't
+// attempting to be, but aren't actively misleading the way a wrong
+// Content-Length or Content-Encoding is - unless policy.ClearValidators
+// opts in to deleting them too.
+func prepareErrorHeaders(h http.Header, contentType string, policy HeaderPolicy) {
 	h.Del("Content-Length")
-	h.Del("Content-Encoding")
+	if !policy.KeepContentEncoding {
+		h.Del("Content-Encoding")
+	}
 	h.Del("Trailer")
 	h.Del("Retry-After")
 	h.Del("WWW-Authenticate")
+	if policy.ClearValidators {
+		h.Del("ETag")
+		h.Del("Last-Modified")
+		h.Del("Accept-Ranges")
+	}
 	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
 }
@@ -351,7 +450,7 @@ func fallbackErrorBody(code ErrorCode) []byte {
 
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, writeErr := writeHTMLErrorBody(w, err)
+	statusCode, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
 	logError(logger, err, statusCode, nil, writeErr)
 }
 
@@ -365,18 +464,18 @@ func WriteHTML(w http.ResponseWriter, err error) int {
 // WriteHTMLResult mirrors WriteJSONResult for the HTML rendering.
 // RenderErr is always nil - see WriteResult.
 func WriteHTMLResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, writeErr := writeHTMLErrorBody(w, err)
+	statusCode, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
 	return WriteResult{Status: statusCode, WriteErr: writeErr}
 }
 
 // writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
-func writeHTMLErrorBody(w http.ResponseWriter, err error) (statusCode int, writeErr error) {
+func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
 	node := outermostCoded(err)
 
-	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8")
+	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8", policy)
 	rateLimitRetryAfterHeader(w.Header(), node)
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 	w.WriteHeader(statusCode)
@@ -455,7 +554,7 @@ func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 // includes a wrapped cause's text without an explicit SetPublicMessage),
 // and logging behave identically to WriteHTTPError.
 func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err)
+	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
 	logError(logger, err, statusCode, renderErr, writeErr)
 }
 
@@ -468,12 +567,12 @@ func WriteProblem(w http.ResponseWriter, err error) int {
 
 // WriteProblemResult mirrors WriteJSONResult for the RFC 9457 rendering.
 func WriteProblemResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err)
+	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
 	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
 }
 
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
-func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, renderErr, writeErr error) {
+func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -520,7 +619,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, ren
 		renderErr = marshalErr
 	}
 
-	prepareErrorHeaders(w.Header(), "application/problem+json")
+	prepareErrorHeaders(w.Header(), "application/problem+json", policy)
 
 	if marshalErr == nil {
 		rateLimitRetryAfterHeader(w.Header(), node)
@@ -1253,7 +1352,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				// can't produce a marshal failure the way a caller's own
 				// SetPublicDetail could, so unlike WriteHTTPError there's
 				// no render error worth plumbing through here.
-				statusCode, _, writeErr := writeJSONErrorBody(tw, err)
+				statusCode, _, writeErr := writeJSONErrorBody(tw, err, currentRecoveryHeaderPolicy())
 
 				_, fields := errorLogFields(err, statusCode)
 				fields["panic"] = rec

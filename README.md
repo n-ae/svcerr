@@ -149,26 +149,42 @@ deliberate asymmetry: an underlying writer implementing only
 through the wrapper, since the flush capability genuinely exists and
 `http.Flusher` is how handlers conventionally probe for it.
 
-**Not compatible with transparent, eagerly-header-setting compression
-wrappers.** Every writer in this package (`WriteJSON`, `WriteHTML`,
-`WriteProblem`, `WriteHTTPError`/`WriteHTTPErrorHTML`/`WriteHTTPProblem`,
-and `RecoveryMiddleware`) unconditionally deletes any pre-existing
-`Content-Encoding` on the `ResponseWriter` before writing its own
-always-plaintext body - this is what stops a panic replaced mid-gzip-response
-from leaving a stale `Content-Encoding: gzip` on a body that's actually
-plain JSON. The tradeoff: if the `ResponseWriter` you pass in belongs to a
-compression middleware that sets `Content-Encoding` once up front and then
-transparently gzips *everything* written through it (a common pattern,
-including outside `RecoveryMiddleware` - any plain `WriteJSON` call
-reaches the same code), that header gets deleted while the body is
-compressed anyway, and the client receives gzip bytes labeled as plain
-text. There's no way for this package to tell a stale header (left over
-from whatever the handler intended before erroring out) apart from a live
-one a wrapper is about to honor. If you use this kind of compression
-middleware, put it *inside* (called before) any of this package's
-writers, not outside/wrapping them.
+**Transparent, eagerly-header-setting compression wrappers need a
+`HeaderPolicy`.** By default every writer in this package (`WriteJSON`,
+`WriteHTML`, `WriteProblem`,
+`WriteHTTPError`/`WriteHTTPErrorHTML`/`WriteHTTPProblem`, and
+`RecoveryMiddleware`) deletes any pre-existing `Content-Encoding` on the
+`ResponseWriter` before writing its own always-plaintext body - this is
+what stops a panic replaced mid-gzip-response from leaving a stale
+`Content-Encoding: gzip` on a body that's actually plain JSON. The
+tradeoff: if the `ResponseWriter` you pass in belongs to a compression
+middleware that sets `Content-Encoding` once up front and then
+transparently gzips *everything* written through it (a common pattern),
+that header gets deleted while the body is compressed anyway, and the
+client receives gzip bytes labeled as plain text. There's no way for this
+package to tell a stale header (left over from whatever the handler
+intended before erroring out) apart from a live one a wrapper is about to
+honor - but *you* know your middleware topology, so declare it once, at
+startup:
 
-**`ETag`, `Last-Modified`, and `Accept-Ranges` are left alone**, unlike
+```go
+svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{KeepContentEncoding: true})
+```
+
+That covers the normal error path - error bodies a handler writes into
+the compression-wrapped `ResponseWriter` it was given. It deliberately
+does *not* cover `RecoveryMiddleware`'s panic replacement, which is
+written to the writer recovery itself wraps, *underneath* any compression
+middleware sitting between recovery and the handler - there the same
+header really is stale even though it's live for the normal path.
+`SetRecoveryHeaderPolicy` configures that path separately, for topologies
+(e.g. compression *outside* recovery) where the replacement body does go
+through the compressor. Without any policy, the previous guidance still
+holds: put this kind of compression middleware *inside* (called before)
+any of this package's writers, not outside/wrapping them.
+
+**`ETag`, `Last-Modified`, and `Accept-Ranges` are left alone by
+default**, unlike
 `Content-Length`/`Content-Encoding`/`Trailer`/`Retry-After`/
 `WWW-Authenticate`, which every writer clears. Those three describe a
 specific successful representation - if a handler set one in anticipation
@@ -180,7 +196,14 @@ mislead a client about the body it's receiving, and a plain `WriteJSON`
 call may legitimately want to preserve headers a handler set for reasons
 unrelated to the error. It's most likely to matter for
 `RecoveryMiddleware` specifically, where the response is replacing an
-abandoned success path rather than being the request's only response.
+abandoned success path rather than being the request's only response. A
+deployment that would rather no abandoned-representation metadata ever
+ride along on an error response can opt into clearing them:
+
+```go
+svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{ClearValidators: true})
+svcerr.SetRecoveryHeaderPolicy(svcerr.HeaderPolicy{ClearValidators: true})
+```
 
 ### Error types
 

@@ -946,6 +946,143 @@ func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {
 	}
 }
 
+func TestHeaderPolicy(t *testing.T) {
+	// Every subtest sets the policies it needs; restore both zero values
+	// afterward so the rest of the suite keeps testing default behavior.
+	t.Cleanup(func() {
+		SetHeaderPolicy(HeaderPolicy{})
+		SetRecoveryHeaderPolicy(HeaderPolicy{})
+	})
+
+	writers := map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	}
+
+	presetValidators := func(h http.Header) {
+		h.Set("ETag", `"abc123"`)
+		h.Set("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+		h.Set("Accept-Ranges", "bytes")
+	}
+
+	for name, write := range writers {
+		t.Run(name+"/default keeps validators", func(t *testing.T) {
+			// The long-standing zero-value behavior, pinned explicitly now
+			// that it's configurable: validators describe an abandoned
+			// representation but don't mislead about the body itself.
+			SetHeaderPolicy(HeaderPolicy{})
+			w := httptest.NewRecorder()
+			presetValidators(w.Header())
+
+			write(w, NewInternalError("test", "boom"), nil)
+
+			if got := w.Header().Get("ETag"); got != `"abc123"` {
+				t.Errorf("ETag = %q, want kept by default", got)
+			}
+		})
+
+		t.Run(name+"/KeepContentEncoding preserves a live compression header", func(t *testing.T) {
+			SetHeaderPolicy(HeaderPolicy{KeepContentEncoding: true})
+			w := httptest.NewRecorder()
+			w.Header().Set("Content-Encoding", "gzip") // a transparent wrapper's live header
+
+			write(w, NewInternalError("test", "boom"), nil)
+
+			if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+				t.Errorf("Content-Encoding = %q, want gzip preserved under KeepContentEncoding", got)
+			}
+			// The policy is surgical: the other resets still happen.
+			if got := w.Header().Get("Content-Length"); got != "" {
+				t.Errorf("Content-Length = %q, want still cleared", got)
+			}
+		})
+
+		t.Run(name+"/ClearValidators removes abandoned-representation metadata", func(t *testing.T) {
+			SetHeaderPolicy(HeaderPolicy{ClearValidators: true})
+			w := httptest.NewRecorder()
+			presetValidators(w.Header())
+
+			write(w, NewInternalError("test", "boom"), nil)
+
+			for _, h := range []string{"ETag", "Last-Modified", "Accept-Ranges"} {
+				if got := w.Header().Get(h); got != "" {
+					t.Errorf("%s = %q, want cleared under ClearValidators", h, got)
+				}
+			}
+		})
+	}
+
+	recoverPanic := func(w http.ResponseWriter) {
+		handler := RecoveryMiddleware(nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			panic("boom")
+		}))
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	}
+
+	t.Run("normal-path policy does not affect the panic replacement", func(t *testing.T) {
+		// The panic replacement is written to the writer recovery wraps,
+		// underneath any compression middleware between recovery and the
+		// handler - a Content-Encoding that middleware set is stale there
+		// even when it's live for the normal path.
+		SetHeaderPolicy(HeaderPolicy{KeepContentEncoding: true, ClearValidators: true})
+		SetRecoveryHeaderPolicy(HeaderPolicy{})
+		w := httptest.NewRecorder()
+		w.Header().Set("Content-Encoding", "gzip")
+		presetValidators(w.Header())
+
+		recoverPanic(w)
+
+		if got := w.Header().Get("Content-Encoding"); got != "" {
+			t.Errorf("Content-Encoding = %q, want cleared - SetHeaderPolicy must not reach the recovery path", got)
+		}
+		if got := w.Header().Get("ETag"); got == "" {
+			t.Error("ETag cleared - SetHeaderPolicy's ClearValidators must not reach the recovery path")
+		}
+	})
+
+	t.Run("recovery policy affects only the panic replacement", func(t *testing.T) {
+		SetHeaderPolicy(HeaderPolicy{})
+		SetRecoveryHeaderPolicy(HeaderPolicy{KeepContentEncoding: true, ClearValidators: true})
+
+		w := httptest.NewRecorder()
+		w.Header().Set("Content-Encoding", "gzip")
+		presetValidators(w.Header())
+		recoverPanic(w)
+		if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+			t.Errorf("Content-Encoding = %q, want gzip preserved under the recovery policy", got)
+		}
+		if got := w.Header().Get("ETag"); got != "" {
+			t.Errorf("ETag = %q, want cleared under the recovery policy", got)
+		}
+
+		// The normal path stays on its own (zero) policy.
+		w2 := httptest.NewRecorder()
+		w2.Header().Set("Content-Encoding", "gzip")
+		WriteHTTPError(w2, NewInternalError("test", "boom"), nil)
+		if got := w2.Header().Get("Content-Encoding"); got != "" {
+			t.Errorf("Content-Encoding = %q, want cleared - SetRecoveryHeaderPolicy must not reach the normal path", got)
+		}
+	})
+
+	t.Run("zero value restores the default behavior", func(t *testing.T) {
+		SetHeaderPolicy(HeaderPolicy{KeepContentEncoding: true, ClearValidators: true})
+		SetHeaderPolicy(HeaderPolicy{})
+
+		w := httptest.NewRecorder()
+		w.Header().Set("Content-Encoding", "gzip")
+		presetValidators(w.Header())
+		WriteHTTPError(w, NewInternalError("test", "boom"), nil)
+
+		if got := w.Header().Get("Content-Encoding"); got != "" {
+			t.Errorf("Content-Encoding = %q, want cleared again after resetting the policy", got)
+		}
+		if got := w.Header().Get("ETag"); got == "" {
+			t.Error("ETag cleared after resetting the policy, want kept again")
+		}
+	})
+}
+
 func TestWriteJSONFallsBackOnUnencodableDetail(t *testing.T) {
 	// SetPublicDetail accepts an arbitrary value; if it can't be
 	// JSON-encoded, WriteJSON must not silently commit a status claiming

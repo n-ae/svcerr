@@ -366,6 +366,34 @@ func TestContractAuthenticateChallenge(t *testing.T) {
 	}
 }
 
+func TestContractHeaderPolicy(t *testing.T) {
+	defer func() {
+		svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{})
+		svcerr.SetRecoveryHeaderPolicy(svcerr.HeaderPolicy{})
+	}()
+
+	// Default: Content-Encoding cleared, validators kept.
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Encoding", "gzip")
+	rec.Header().Set("ETag", `"abc"`)
+	svcerr.WriteJSON(rec, svcerr.NewInternalError("test", "boom"))
+	if rec.Header().Get("Content-Encoding") != "" || rec.Header().Get("ETag") != `"abc"` {
+		t.Errorf("default policy: Content-Encoding=%q ETag=%q, want cleared/kept",
+			rec.Header().Get("Content-Encoding"), rec.Header().Get("ETag"))
+	}
+
+	// Both knobs flipped, through exported API only.
+	svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{KeepContentEncoding: true, ClearValidators: true})
+	rec = httptest.NewRecorder()
+	rec.Header().Set("Content-Encoding", "gzip")
+	rec.Header().Set("ETag", `"abc"`)
+	svcerr.WriteJSON(rec, svcerr.NewInternalError("test", "boom"))
+	if rec.Header().Get("Content-Encoding") != "gzip" || rec.Header().Get("ETag") != "" {
+		t.Errorf("flipped policy: Content-Encoding=%q ETag=%q, want kept/cleared",
+			rec.Header().Get("Content-Encoding"), rec.Header().Get("ETag"))
+	}
+}
+
 // unprintableError is a consumer-defined error implementing only
 // svcerr.Coder - the minimal capability the package documents as enough
 // to participate in status mapping.
