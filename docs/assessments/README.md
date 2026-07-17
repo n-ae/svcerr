@@ -14,3 +14,4 @@ them there; new assessments are created here with the next number.
 | 0005 | v0.6.0 | [0005-svcerr-v0.6.0-review.md](0005-svcerr-v0.6.0-review.md) |
 | 0006 | v0.6.1 | [0006-svcerr-v0.6.1-review.md](0006-svcerr-v0.6.1-review.md) |
 | 0007 | v0.6.2 | [0007-svcerr-v0.6.2-review.md](0007-svcerr-v0.6.2-review.md) |
+| 0008 | v0.6.3 | [0008-svcerr-v0.6.3-review.md](0008-svcerr-v0.6.3-review.md) |
