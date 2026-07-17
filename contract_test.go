@@ -589,20 +589,27 @@ func (w *disconnectedWriter) Write([]byte) (int, error) {
 func (w *disconnectedWriter) WriteHeader(status int) { w.status = status }
 
 func TestContractWriteResult(t *testing.T) {
-	t.Run("success reports the selected status and no errors", func(t *testing.T) {
-		res := svcerr.WriteJSONResult(httptest.NewRecorder(), svcerr.NewNotFoundError("league", "12345"))
+	t.Run("success reports the selected status, full byte count, and no errors", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		res := svcerr.WriteJSONResult(rec, svcerr.NewNotFoundError("league", "12345"))
 		if res.Status != http.StatusNotFound || res.RenderErr != nil || res.WriteErr != nil {
 			t.Errorf("WriteResult = %+v, want Status=404 with nil errors", res)
 		}
+		if res.BytesWritten == 0 || res.BytesWritten != rec.Body.Len() {
+			t.Errorf("BytesWritten = %d, want the delivered body length %d", res.BytesWritten, rec.Body.Len())
+		}
 	})
 
-	t.Run("delivery failure surfaces as WriteErr", func(t *testing.T) {
+	t.Run("delivery failure surfaces as WriteErr with zero bytes", func(t *testing.T) {
 		res := svcerr.WriteJSONResult(&disconnectedWriter{}, svcerr.NewNotFoundError("league", "12345"))
 		if res.Status != http.StatusNotFound {
 			t.Errorf("Status = %d, want 404 (the classification still happened)", res.Status)
 		}
 		if res.WriteErr == nil {
 			t.Error("WriteErr = nil, want the transport failure surfaced")
+		}
+		if res.BytesWritten != 0 {
+			t.Errorf("BytesWritten = %d, want 0 - nothing was delivered", res.BytesWritten)
 		}
 	})
 
@@ -624,6 +631,9 @@ func TestContractWriteResult(t *testing.T) {
 		}
 		if resp.Error.Code != svcerr.ErrCodeInternal {
 			t.Errorf("fallback Error.Code = %v, want %v", resp.Error.Code, svcerr.ErrCodeInternal)
+		}
+		if res.BytesWritten != rec.Body.Len() {
+			t.Errorf("BytesWritten = %d, want %d - the fallback document itself was fully delivered", res.BytesWritten, rec.Body.Len())
 		}
 	})
 }

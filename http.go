@@ -110,9 +110,10 @@ func HTTPStatusCode(code ErrorCode) int {
 // serialization or delivery failure without participating in this
 // package's Logger contract. WriteHTTPError/WriteHTTPErrorHTML/
 // WriteHTTPProblem carry the same information into their log fields
-// (response_render_error, response_write_error, rendered_error_code)
-// instead of returning it; the plain WriteJSON/WriteHTML/WriteProblem
-// functions discard it entirely, same as before this type existed.
+// (response_render_error, response_write_error, response_bytes_written,
+// rendered_error_code) instead of returning it; the plain WriteJSON/
+// WriteHTML/WriteProblem functions discard it entirely, same as before
+// this type existed.
 type WriteResult struct {
 	// Status is the HTTP status code svcerr selected and passed to
 	// w.WriteHeader - the fallback 500 on a marshal failure, not
@@ -133,12 +134,21 @@ type WriteResult struct {
 	// imply a different body was sent, only that delivery of the
 	// intended one may have failed or been truncated.
 	WriteErr error
+	// BytesWritten is the number of body bytes the final w.Write reported
+	// written: the full body length when WriteErr is nil, less on a
+	// truncated delivery (WriteErr is then non-nil - the transport's own
+	// error, or io.ErrShortWrite for a non-conforming writer that
+	// under-reported with a nil error). Body accounting only; status line
+	// and header bytes are never counted. Like Status, it's what the
+	// ResponseWriter reported, not a transport confirmation the client
+	// received those bytes.
+	BytesWritten int
 }
 
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
-	logError(logger, err, statusCode, renderErr, writeErr)
+	statusCode, bytesWritten, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
+	logError(logger, err, statusCode, renderErr, writeErr, bytesWritten)
 }
 
 // WriteJSON writes err's standardized JSON error response to w and returns
@@ -157,8 +167,8 @@ func WriteJSON(w http.ResponseWriter, err error) int {
 // caller, or report the failure through its own error-tracking system
 // instead of this package's Logger contract.
 func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
-	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
+	statusCode, bytesWritten, renderErr, writeErr := writeJSONErrorBody(w, err, currentHeaderPolicy())
+	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr, BytesWritten: bytesWritten}
 }
 
 // checkedWrite writes body to w, returning an error if either Write itself
@@ -169,12 +179,12 @@ func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
 // specifically against a non-conforming custom writer, test double, or
 // future adapter that violates that contract and would otherwise have a
 // truncated body silently treated as a fully-delivered response.
-func checkedWrite(w http.ResponseWriter, body []byte) error {
+func checkedWrite(w http.ResponseWriter, body []byte) (int, error) {
 	n, err := w.Write(body)
 	if err == nil && n != len(body) {
 		err = io.ErrShortWrite
 	}
-	return err
+	return n, err
 }
 
 // writeJSONErrorBody writes err's JSON body and headers to w and returns
@@ -185,7 +195,7 @@ func checkedWrite(w http.ResponseWriter, body []byte) error {
 // WriteHTTPError's case). Split out of WriteHTTPError so RecoveryMiddleware
 // can write the response and log the panic as a single record instead of
 // the response write and the log call each logging independently.
-func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, renderErr, writeErr error) {
+func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode, bytesWritten int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -221,9 +231,9 @@ func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	writeErr = checkedWrite(w, body)
+	bytesWritten, writeErr = checkedWrite(w, body)
 
-	return statusCode, renderErr, writeErr
+	return statusCode, bytesWritten, renderErr, writeErr
 }
 
 // HeaderPolicy configures how this package's response writers treat
@@ -450,8 +460,8 @@ func fallbackErrorBody(code ErrorCode) []byte {
 
 // WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
-	logError(logger, err, statusCode, nil, writeErr)
+	statusCode, bytesWritten, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
+	logError(logger, err, statusCode, nil, writeErr, bytesWritten)
 }
 
 // WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML
@@ -464,12 +474,12 @@ func WriteHTML(w http.ResponseWriter, err error) int {
 // WriteHTMLResult mirrors WriteJSONResult for the HTML rendering.
 // RenderErr is always nil - see WriteResult.
 func WriteHTMLResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
-	return WriteResult{Status: statusCode, WriteErr: writeErr}
+	statusCode, bytesWritten, writeErr := writeHTMLErrorBody(w, err, currentHeaderPolicy())
+	return WriteResult{Status: statusCode, WriteErr: writeErr, BytesWritten: bytesWritten}
 }
 
 // writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
-func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, writeErr error) {
+func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode, bytesWritten int, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	message := getUserFriendlyMessage(code, err)
@@ -485,9 +495,9 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 		`<p>` + html.EscapeString(message) + `</p>` +
 		`</div>`
 
-	writeErr = checkedWrite(w, []byte(body))
+	bytesWritten, writeErr = checkedWrite(w, []byte(body))
 
-	return statusCode, writeErr
+	return statusCode, bytesWritten, writeErr
 }
 
 // ProblemDetails is the RFC 9457 (https://www.rfc-editor.org/rfc/rfc9457)
@@ -554,8 +564,8 @@ func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 // includes a wrapped cause's text without an explicit SetPublicMessage),
 // and logging behave identically to WriteHTTPError.
 func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
-	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
-	logError(logger, err, statusCode, renderErr, writeErr)
+	statusCode, bytesWritten, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
+	logError(logger, err, statusCode, renderErr, writeErr, bytesWritten)
 }
 
 // WriteProblem mirrors WriteJSON for the RFC 9457 rendering
@@ -567,12 +577,12 @@ func WriteProblem(w http.ResponseWriter, err error) int {
 
 // WriteProblemResult mirrors WriteJSONResult for the RFC 9457 rendering.
 func WriteProblemResult(w http.ResponseWriter, err error) WriteResult {
-	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
-	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
+	statusCode, bytesWritten, renderErr, writeErr := writeProblemJSONBody(w, err, currentHeaderPolicy())
+	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr, BytesWritten: bytesWritten}
 }
 
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
-func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode int, renderErr, writeErr error) {
+func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy) (statusCode, bytesWritten int, renderErr, writeErr error) {
 	code := GetErrorCode(err)
 	statusCode = HTTPStatusCode(code)
 	node := outermostCoded(err)
@@ -628,9 +638,9 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy)
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	writeErr = checkedWrite(w, body)
+	bytesWritten, writeErr = checkedWrite(w, body)
 
-	return statusCode, renderErr, writeErr
+	return statusCode, bytesWritten, renderErr, writeErr
 }
 
 // fallbackProblemBody mirrors fallbackErrorBody for the problem+json body -
@@ -906,7 +916,7 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 // truncated (client disconnect, expired deadline, ...), which is
 // otherwise invisible: WriteHeader/Write don't return to their caller in
 // a way any of this package's writers surface today.
-func logError(logger Logger, err error, statusCode int, renderErr, writeErr error) {
+func logError(logger Logger, err error, statusCode int, renderErr, writeErr error, bytesWritten int) {
 	level, fields := errorLogFields(err, statusCode)
 	if renderErr != nil {
 		fields["response_render_error"] = renderErr.Error()
@@ -914,6 +924,10 @@ func logError(logger Logger, err error, statusCode int, renderErr, writeErr erro
 	}
 	if writeErr != nil {
 		fields["response_write_error"] = writeErr.Error()
+		// Only meaningful alongside the failure: how much of the body got
+		// out before delivery broke. On a full write it's implied by the
+		// body itself, so it isn't logged as noise on every response.
+		fields["response_bytes_written"] = bytesWritten
 	}
 	safeLog(logger, level, err, fields, "HTTP error response")
 }
@@ -1352,7 +1366,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				// can't produce a marshal failure the way a caller's own
 				// SetPublicDetail could, so unlike WriteHTTPError there's
 				// no render error worth plumbing through here.
-				statusCode, _, writeErr := writeJSONErrorBody(tw, err, currentRecoveryHeaderPolicy())
+				statusCode, bytesWritten, _, writeErr := writeJSONErrorBody(tw, err, currentRecoveryHeaderPolicy())
 
 				_, fields := errorLogFields(err, statusCode)
 				fields["panic"] = rec
@@ -1360,6 +1374,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				fields["path"] = r.URL.Path
 				if writeErr != nil {
 					fields["response_write_error"] = writeErr.Error()
+					fields["response_bytes_written"] = bytesWritten
 				}
 				safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler")
 

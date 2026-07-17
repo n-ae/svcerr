@@ -498,6 +498,9 @@ func TestWriteHTTPError(t *testing.T) {
 		if _, ok := logger.calls[0].fields["response_write_error"]; !ok {
 			t.Error("expected a response_write_error field - the client never received a body and nothing else says so")
 		}
+		if got, ok := logger.calls[0].fields["response_bytes_written"]; !ok || got != 0 {
+			t.Errorf(`fields["response_bytes_written"] = %v (present=%v), want 0 - failingWriter delivers nothing`, got, ok)
+		}
 	})
 
 	t.Run("internal error logs at error level with stack trace", func(t *testing.T) {
@@ -1208,6 +1211,9 @@ func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 		if got.RenderErr != nil || got.WriteErr != nil {
 			t.Errorf("RenderErr/WriteErr = %v/%v, want nil/nil on a normal write", got.RenderErr, got.WriteErr)
 		}
+		if got.BytesWritten == 0 || got.BytesWritten != w.Body.Len() {
+			t.Errorf("BytesWritten = %d, want the full delivered body length %d", got.BytesWritten, w.Body.Len())
+		}
 
 		other := httptest.NewRecorder()
 		if wantStatus := WriteJSON(other, err); got.Status != wantStatus || w.Body.String() != other.Body.String() {
@@ -1227,6 +1233,9 @@ func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 		if got.WriteErr != nil {
 			t.Errorf("WriteErr = %v, want nil on a normal write", got.WriteErr)
 		}
+		if got.BytesWritten != w.Body.Len() {
+			t.Errorf("BytesWritten = %d, want %d", got.BytesWritten, w.Body.Len())
+		}
 	})
 
 	t.Run("WriteProblemResult", func(t *testing.T) {
@@ -1237,6 +1246,9 @@ func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 		}
 		if got.RenderErr != nil || got.WriteErr != nil {
 			t.Errorf("RenderErr/WriteErr = %v/%v, want nil/nil on a normal write", got.RenderErr, got.WriteErr)
+		}
+		if got.BytesWritten != w.Body.Len() {
+			t.Errorf("BytesWritten = %d, want %d", got.BytesWritten, w.Body.Len())
 		}
 	})
 
@@ -1260,13 +1272,21 @@ func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 		if got.WriteErr == nil {
 			t.Error("WriteErr = nil, want the write failure")
 		}
+		if got.BytesWritten != 0 {
+			t.Errorf("BytesWritten = %d, want 0 - failingWriter delivers nothing", got.BytesWritten)
+		}
 	})
 
 	t.Run("WriteJSONResult reports a short write as a failure", func(t *testing.T) {
+		full := WriteJSONResult(httptest.NewRecorder(), err).BytesWritten
+
 		w := &shortWriter{}
 		got := WriteJSONResult(w, err)
 		if got.WriteErr != io.ErrShortWrite {
 			t.Errorf("WriteErr = %v, want %v (assessment 0008 short-write hardening: a Write returning n < len(p) with a nil error violates io.Writer's contract and must not be treated as a full write)", got.WriteErr, io.ErrShortWrite)
+		}
+		if got.BytesWritten != full/2 {
+			t.Errorf("BytesWritten = %d, want %d - shortWriter reports delivering half the body", got.BytesWritten, full/2)
 		}
 	})
 
