@@ -783,7 +783,7 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
 			}
 			if got := w.Header().Get("WWW-Authenticate"); got != "" {
-				t.Errorf("WWW-Authenticate = %q, want empty (this package can't invent an application's auth scheme unless SetAuthenticateChallenge is called)", got)
+				t.Errorf("WWW-Authenticate = %q, want empty (this package can't invent an application's auth scheme: no SetAuthenticateChallenge on the error, no SetDefaultAuthenticateChallenge configured)", got)
 			}
 		})
 
@@ -811,6 +811,104 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultAuthenticateChallenge(t *testing.T) {
+	// Every subtest sets the application-wide default; clear it afterward
+	// so the rest of the suite keeps testing the unconfigured behavior.
+	t.Cleanup(func() { SetDefaultAuthenticateChallenge("") })
+
+	writers := map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	}
+
+	for name, write := range writers {
+		t.Run(name+"/default fills a bare 401", func(t *testing.T) {
+			SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+			w := httptest.NewRecorder()
+
+			write(w, NewAuthenticationError("token_invalid", "invalid authentication token"), nil)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="api"` {
+				t.Errorf("WWW-Authenticate = %q, want the application-wide default", got)
+			}
+		})
+
+		t.Run(name+"/error-specific challenge wins over the default", func(t *testing.T) {
+			SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+			w := httptest.NewRecorder()
+			err := NewAuthenticationError("token_expired", "session expired")
+			err.SetAuthenticateChallenge(`Bearer realm="api", error="invalid_token"`)
+
+			write(w, err, nil)
+
+			if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="api", error="invalid_token"` {
+				t.Errorf("WWW-Authenticate = %q, want the error-specific challenge, not the default", got)
+			}
+		})
+
+		t.Run(name+"/default is not applied to a non-401", func(t *testing.T) {
+			SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+			w := httptest.NewRecorder()
+
+			write(w, NewNotFoundError("league", "1"), nil)
+
+			if got := w.Header().Get("WWW-Authenticate"); got != "" {
+				t.Errorf("WWW-Authenticate = %q, want empty (the default only applies to 401 responses)", got)
+			}
+		})
+
+		t.Run(name+"/default covers a non-Authenticator Coder's 401", func(t *testing.T) {
+			// The case the default exists for beyond BaseError types: a
+			// custom Coder mapping to 401 has no SetAuthenticateChallenge
+			// to call, but the application default still applies.
+			SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+			w := httptest.NewRecorder()
+
+			write(w, &minimalCodedUnwrappableError{code: ErrCodeUnauthorized, msg: "unauthorized"}, nil)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="api"` {
+				t.Errorf("WWW-Authenticate = %q, want the application-wide default", got)
+			}
+		})
+	}
+
+	t.Run("empty string clears the default", func(t *testing.T) {
+		SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+		SetDefaultAuthenticateChallenge("")
+		w := httptest.NewRecorder()
+
+		WriteHTTPError(w, NewAuthenticationError("token_invalid", "invalid authentication token"), nil)
+
+		if got := w.Header().Get("WWW-Authenticate"); got != "" {
+			t.Errorf("WWW-Authenticate = %q, want empty after clearing the default", got)
+		}
+	})
+
+	t.Run("stale handler-set header is replaced by the default, not kept", func(t *testing.T) {
+		// prepareErrorHeaders deletes any pre-existing WWW-Authenticate
+		// (it describes the response the handler abandoned, not this one),
+		// then setAuthenticateChallenge re-adds the applicable value - the
+		// default must flow through that reset the same way an
+		// error-specific challenge does.
+		SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+		w := httptest.NewRecorder()
+		w.Header().Set("WWW-Authenticate", `Basic realm="old"`)
+
+		WriteHTTPError(w, NewAuthenticationError("token_invalid", "invalid authentication token"), nil)
+
+		if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="api"` {
+			t.Errorf("WWW-Authenticate = %q, want the default, with the stale value gone", got)
+		}
+	})
 }
 
 func TestPrepareErrorHeadersClearsStaleSuccessHeaders(t *testing.T) {

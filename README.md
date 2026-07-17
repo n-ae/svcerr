@@ -359,21 +359,37 @@ err.SetPublicMessage("user was not found") // ...and this removes it from messag
 
 ### Authentication challenges
 
-[RFC 7235 §3.1](https://www.rfc-editor.org/rfc/rfc7235#section-3.1)
+[RFC 9110 §11.6.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-11.6.1)
 requires a server generating a 401 response to include at least one
 `WWW-Authenticate` challenge. This package has no way to know an
-application's authentication scheme or realm on its own, so none of the
-response writers set one unless the error provides it via
-`SetAuthenticateChallenge`:
+application's authentication scheme or realm on its own, so it never
+invents one - configure an application-wide default once, at startup
+(like `RegisterStatusCode`):
 
 ```go
-err := svcerr.NewAuthenticationError("token_invalid", "invalid authentication token")
-err.SetAuthenticateChallenge(`Bearer realm="api"`)
-svcerr.WriteHTTPError(w, err, logger) // now sends WWW-Authenticate too
+func init() {
+	svcerr.SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+}
 ```
 
-Only applied when the response status is 401 - set on an error whose code
-maps elsewhere and it's silently unused.
+Every 401 from `WriteHTTPError`/`WriteHTTPErrorHTML`/`WriteHTTPProblem`
+(and the `WriteJSON`/`WriteHTML`/`WriteProblem` variants) now carries that
+challenge, without each authentication-error construction site having to
+remember an HTTP protocol rule. A specific error instance can still
+override it via `SetAuthenticateChallenge`, which always wins over the
+default:
+
+```go
+err := svcerr.NewAuthenticationError("token_expired", "session expired")
+err.SetAuthenticateChallenge(`Bearer realm="api", error="invalid_token", error_description="the access token expired"`)
+svcerr.WriteHTTPError(w, err, logger) // sends the error-specific challenge
+```
+
+Both are only applied when the response status is 401 - set on an error
+whose code maps elsewhere and they're silently unused. Without either, a
+bare 401 (no `WWW-Authenticate`) is still possible; the package won't
+guess a scheme for you. `SetDefaultAuthenticateChallenge("")` clears the
+default.
 
 ### Wrapping constructors in your own helper
 

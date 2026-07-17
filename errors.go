@@ -152,12 +152,15 @@ type ProblemTitler interface {
 }
 
 // Authenticator is implemented by any error that specifies its own
-// WWW-Authenticate challenge for a 401 response. RFC 7235 §3.1 requires a
-// server generating a 401 to include at least one WWW-Authenticate
-// challenge; this package has no way to know an application's
-// authentication scheme or realm on its own, so none of the response
-// writers set one unless the error provides it. BaseError implements it
-// via SetAuthenticateChallenge/AuthenticateChallenge.
+// WWW-Authenticate challenge for a 401 response. RFC 9110 §11.6.1
+// requires a server generating a 401 to include at least one
+// WWW-Authenticate challenge; this package has no way to know an
+// application's authentication scheme or realm on its own, so the
+// response writers set one only when the error provides it - or, when it
+// doesn't, from the application-wide default configured via
+// SetDefaultAuthenticateChallenge (an error-specific challenge always
+// wins over that default). BaseError implements it via
+// SetAuthenticateChallenge/AuthenticateChallenge.
 type Authenticator interface {
 	AuthenticateChallenge() (string, bool)
 }
@@ -359,7 +362,9 @@ func (e *BaseError) ProblemTitle() (string, bool) {
 // WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem send alongside a 401
 // response - e.g. `Bearer realm="api"`. Only applied when the error's
 // code maps to 401; set on an error whose code maps elsewhere and it's
-// silently unused.
+// silently unused. Takes precedence over the application-wide
+// SetDefaultAuthenticateChallenge value, which covers 401 errors that
+// don't call this.
 func (e *BaseError) SetAuthenticateChallenge(challenge string) {
 	e.authenticateChallenge = challenge
 }

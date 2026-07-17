@@ -152,6 +152,27 @@ func ExampleRegisterStatusCode() {
 	// {"error":{"code":"OUT_OF_STOCK","message":"This item is out of stock."}}
 }
 
+// An application-wide default WWW-Authenticate challenge, configured once
+// at startup, covers every 401 whose error doesn't carry its own via
+// SetAuthenticateChallenge - RFC 9110 §11.6.1 requires a challenge on
+// every server-generated 401, and this saves each authentication-error
+// construction site from having to remember that. (The deferred clear
+// here is only to isolate this example from the rest of the test binary;
+// real applications set it once and leave it.)
+func ExampleSetDefaultAuthenticateChallenge() {
+	svcerr.SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+	defer svcerr.SetDefaultAuthenticateChallenge("")
+
+	rec := httptest.NewRecorder()
+	status := svcerr.WriteJSON(rec, svcerr.NewAuthenticationError("token_expired", "session expired"))
+
+	fmt.Println(status)
+	fmt.Println(rec.Header().Get("WWW-Authenticate"))
+	// Output:
+	// 401
+	// Bearer realm="api"
+}
+
 // RecoveryMiddleware turns a handler panic into a proper 500 JSON
 // response (when nothing was committed yet) and one structured log
 // record; a nil logger disables logging without changing the response.

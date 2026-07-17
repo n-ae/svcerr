@@ -287,22 +287,50 @@ func rateLimitRetryAfterHeader(h http.Header, node coderError) {
 	}
 }
 
+var (
+	defaultAuthMu        sync.RWMutex
+	defaultAuthChallenge string
+)
+
+// SetDefaultAuthenticateChallenge sets an application-wide WWW-Authenticate
+// challenge (e.g. `Bearer realm="api"`) that every 401 response from this
+// package's writers carries when the error itself doesn't provide one via
+// SetAuthenticateChallenge - an error-specific challenge always wins over
+// this default. RFC 9110 §11.6.1 requires at least one WWW-Authenticate
+// challenge on every server-generated 401 response; this package can't
+// invent an application's authentication scheme or realm on its own, so
+// without this call (or per-error challenges) a bare 401 remains possible.
+// Set it once at startup, like RegisterStatusCode; the empty string clears
+// it. Safe for concurrent use.
+func SetDefaultAuthenticateChallenge(challenge string) {
+	defaultAuthMu.Lock()
+	defaultAuthChallenge = challenge
+	defaultAuthMu.Unlock()
+}
+
 // setAuthenticateChallenge sets the WWW-Authenticate header when
-// statusCode is 401 and node (the same outermost coded node used for
-// everything else in err's classification) provides a challenge via
-// Authenticator - RFC 7235 §3.1 requires at least one WWW-Authenticate
-// challenge on every 401 response, but this package has no way to invent
-// an application's authentication scheme or realm on its own, so it's
-// opt-in. Shared by all three response writers (JSON, HTML, problem+json).
+// statusCode is 401: the challenge from node (the same outermost coded
+// node used for everything else in err's classification) via
+// Authenticator if it provides one, else the application-wide
+// SetDefaultAuthenticateChallenge value if set, else nothing - RFC 9110
+// §11.6.1 requires at least one WWW-Authenticate challenge on every 401
+// response, but this package has no way to invent an application's
+// authentication scheme or realm on its own, so both sources are opt-in.
+// Shared by all three response writers (JSON, HTML, problem+json).
 func setAuthenticateChallenge(h http.Header, statusCode int, node coderError) {
 	if statusCode != http.StatusUnauthorized {
 		return
 	}
-	a, ok := node.(Authenticator)
-	if !ok {
-		return
+	if a, ok := node.(Authenticator); ok {
+		if challenge, set := a.AuthenticateChallenge(); set {
+			h.Set("WWW-Authenticate", challenge)
+			return
+		}
 	}
-	if challenge, set := a.AuthenticateChallenge(); set {
+	defaultAuthMu.RLock()
+	challenge := defaultAuthChallenge
+	defaultAuthMu.RUnlock()
+	if challenge != "" {
 		h.Set("WWW-Authenticate", challenge)
 	}
 }

@@ -347,6 +347,23 @@ func TestContractAuthenticateChallenge(t *testing.T) {
 	if h := rec.Header().Get("WWW-Authenticate"); h != `Bearer realm="api", error="invalid_token"` {
 		t.Errorf("WWW-Authenticate = %q, want the configured challenge", h)
 	}
+
+	// The application-wide default covers 401s whose error carries no
+	// challenge of its own; an error-specific challenge still wins.
+	svcerr.SetDefaultAuthenticateChallenge(`Bearer realm="api"`)
+	defer svcerr.SetDefaultAuthenticateChallenge("")
+
+	rec = httptest.NewRecorder()
+	svcerr.WriteJSON(rec, svcerr.NewAuthenticationError("token_expired", "session expired"))
+	if h := rec.Header().Get("WWW-Authenticate"); h != `Bearer realm="api"` {
+		t.Errorf("WWW-Authenticate = %q, want the application-wide default", h)
+	}
+
+	rec = httptest.NewRecorder()
+	svcerr.WriteJSON(rec, withChallenge)
+	if h := rec.Header().Get("WWW-Authenticate"); h != `Bearer realm="api", error="invalid_token"` {
+		t.Errorf("WWW-Authenticate = %q, want the error-specific challenge to beat the default", h)
+	}
 }
 
 // unprintableError is a consumer-defined error implementing only
