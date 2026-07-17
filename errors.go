@@ -30,6 +30,18 @@
 //	return svcerr.Wrap(errors.Join(notFoundErr, cleanupErr),
 //		svcerr.ErrCodeInternal, "request processing failed")
 //
+// The exported identity fields on the semantic types (ValidationError.Field,
+// NotFoundError.ResourceID, RateLimitError.RetryAfter, and so on) are
+// constructor outputs and must be treated as read-only: the constructors
+// derive the error's code, message, and context from them once, so
+// assigning one after construction desynchronizes the classification
+// from what the response writers and log fields then report. The one
+// identity-adjacent value legitimately learned after construction - an
+// upstream retry hint - has a dedicated setter, ExternalAPIError.SetRetryAfter.
+// At v1 these fields become unexported with same-name accessor methods,
+// making the read-only contract compiler-enforced; migration is
+// mechanical (x.Field becomes x.Field()). See docs/v1-design-pass.md.
+//
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
 // SetProblemTitle, SetAuthenticateChallenge, and RecaptureStackTrace all
@@ -521,6 +533,8 @@ func Wrap(err error, code ErrorCode, message string) *BaseError {
 // ValidationError represents input validation errors
 type ValidationError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	Field string
 	Value interface{}
 }
@@ -561,6 +575,8 @@ func WrapValidationError(err error, message string, field string) *ValidationErr
 // DatabaseError represents database operation errors
 type DatabaseError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	Operation string // "query", "insert", "update", "delete", "transaction", "migration"
 	Query     string
 }
@@ -619,14 +635,18 @@ func WrapDatabaseError(err error, operation, query string) *DatabaseError {
 // ExternalAPIError represents errors from external APIs
 type ExternalAPIError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	Service    string // caller-defined service name, e.g. "yahoo", "nba_stats"
 	StatusCode int
 	URL        string
 	// RetryAfter is seconds to retry after, e.g. propagated from the
-	// upstream's own Retry-After. Not set by the constructors - assign it
-	// directly when known. When set, the response writers emit it as the
-	// Retry-After header and the retry_after details member, clamped to
-	// non-negative at emission (RFC 9110 §10.2.3).
+	// upstream's own Retry-After. Not set by the constructors - use
+	// SetRetryAfter when the hint is known, which clamps to non-negative
+	// (RFC 9110 §10.2.3); direct assignment bypasses that clamp and is
+	// deprecated ahead of v1, when this field becomes unexported. When
+	// set, the response writers emit it as the Retry-After header and the
+	// retry_after details member, re-clamped at emission.
 	RetryAfter *int
 }
 
@@ -669,9 +689,21 @@ func WrapExternalAPIError(err error, service, url string, statusCode int) *Exter
 	}
 }
 
+// SetRetryAfter records an upstream retry hint of seconds (e.g. parsed
+// from the upstream's own Retry-After), clamped to non-negative per RFC
+// 9110 §10.2.3 - the sanctioned way to attach the hint after
+// construction, since no constructor takes it. The response writers then
+// emit it as the Retry-After header and the retry_after details member.
+func (e *ExternalAPIError) SetRetryAfter(seconds int) {
+	seconds = clampRetryAfter(seconds)
+	e.RetryAfter = &seconds
+}
+
 // AuthenticationError represents authentication and authorization errors
 type AuthenticationError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	SessionID string
 	Reason    string // "token_expired", "token_invalid", "permission_denied"
 }
@@ -733,6 +765,8 @@ func WrapAuthenticationError(err error, reason, message string) *AuthenticationE
 // NotFoundError represents resource not found errors
 type NotFoundError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	ResourceType string
 	ResourceID   string
 }
@@ -779,6 +813,8 @@ func WrapNotFoundError(err error, resourceType, resourceID string) *NotFoundErro
 // ConflictError represents resource conflict errors
 type ConflictError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	ResourceType string
 	ConflictKey  string
 }
@@ -824,6 +860,8 @@ func WrapConflictError(err error, resourceType, conflictKey, message string) *Co
 // RateLimitError represents rate limiting errors
 type RateLimitError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	Service    string
 	Limit      int
 	RetryAfter int // seconds
@@ -893,6 +931,8 @@ func WrapRateLimitError(err error, service string, limit, retryAfter int) *RateL
 // InternalError represents unexpected internal errors
 type InternalError struct {
 	BaseError
+	// Read-only identity fields - see the package doc's identity-field
+	// note; same-name accessor methods replace them at v1.
 	Component string
 }
 

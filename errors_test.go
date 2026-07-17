@@ -1210,3 +1210,34 @@ func TestJoinedErrorClassificationIsChildOrderDependent(t *testing.T) {
 		t.Error("explicit classification must preserve the joined children for errors.Is")
 	}
 }
+
+// TestExternalAPIErrorSetRetryAfter covers the stage-2 setter: the
+// sanctioned way to attach an upstream retry hint after construction,
+// clamping on the way in so the stored value is always a valid
+// delay-seconds - unlike direct field assignment, which stays possible
+// (and unclamped at rest) only until v1 unexports the field.
+func TestExternalAPIErrorSetRetryAfter(t *testing.T) {
+	err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
+	if err.RetryAfter != nil {
+		t.Fatalf("RetryAfter = %v, want nil before any hint is recorded", *err.RetryAfter)
+	}
+
+	err.SetRetryAfter(30)
+	if err.RetryAfter == nil || *err.RetryAfter != 30 {
+		t.Fatalf("RetryAfter = %v, want 30", err.RetryAfter)
+	}
+
+	err.SetRetryAfter(-9)
+	if err.RetryAfter == nil || *err.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0 - the setter clamps negative hints at the source", err.RetryAfter)
+	}
+
+	// Each call stores a fresh pointer: a caller holding the previous
+	// pointer must not observe later hints through it.
+	err.SetRetryAfter(10)
+	first := err.RetryAfter
+	err.SetRetryAfter(20)
+	if *first != 10 {
+		t.Errorf("earlier pointer now reads %d, want 10 - SetRetryAfter must not mutate through old pointers", *first)
+	}
+}

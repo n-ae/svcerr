@@ -159,13 +159,14 @@ func prepareErrorHeaders(h http.Header, contentType string, policy HeaderPolicy)
 // that response no longer represents err's own classification.
 //
 // RetryAfter is re-clamped here, at the wire boundary, because both
-// fields are exported and writable: RateLimitError's constructor clamp is
-// only input cleanup, and ExternalAPIError's field is documented for
-// direct assignment with no constructor involved at all - a negative
-// value would otherwise become an invalid Retry-After (RFC 9110 §10.2.3
-// requires a non-negative delay-seconds). extractErrorDetails and
-// errorLogFields clamp the same way, so the header, the JSON details,
-// and the log field always agree.
+// fields are exported and writable until v1: RateLimitError's
+// constructor clamp and ExternalAPIError.SetRetryAfter's clamp are only
+// input cleanup that direct field assignment can still bypass - a
+// negative value would otherwise become an invalid Retry-After (RFC 9110
+// §10.2.3 requires a non-negative delay-seconds). extractErrorDetails
+// and errorLogFields clamp the same way, so the header, the JSON
+// details, and the log field always agree. Once v1 unexports the fields,
+// these emission clamps become removable (docs/v1-design-pass.md).
 func retryAfterHeader(h http.Header, node coderError) {
 	switch v := node.(type) {
 	case *RateLimitError:

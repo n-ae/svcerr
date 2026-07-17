@@ -234,6 +234,40 @@ the numbered-assessment cadence can gate each one.
    at a major version. This document takes no position beyond "decide
    explicitly at stage 3".
 
+## Amendment (2026-07-17): stage 2 revised, open question 1 resolved
+
+Executing stage 2 surfaced a Go constraint this document's original plan
+missed: **a type cannot have a field and a method with the same name**
+(`type T struct{ Field string }` plus `func (t *T) Field()` fails to
+compile - "field and method with the same name"; selector namespaces are
+shared). "Getters added alongside the 18 exported fields" is therefore
+impossible with the bare names this document recommends for v1.
+
+The alternatives were interim `GetX` names (a permanent, non-idiomatic
+second spelling, contradicting Effective Go, and forcing consumers
+through two renames or leaving `GetX` forever) or moving the accessor
+introduction to v1 itself, where the fields unexport simultaneously and
+the bare names become free. The second is strictly better: the v1
+migration is purely mechanical and compiler-guided - `x.Field` becomes
+`x.Field()`, nothing else changes - which is as gentle as a migration
+window would have been.
+
+Resolutions:
+
+- **Open question 1 (getter naming): resolved.** Bare, same-name
+  accessors at v1 (`nfErr.ResourceID()`); no `GetX` interim.
+  `GetErrorCode`/`GetStackTrace` stay as-is - they are package-level
+  chain-walking helpers, not field accessors.
+- **Stage 2 as executed** (v0.13.0): `ExternalAPIError.SetRetryAfter`
+  (the sanctioned, clamping way to attach an upstream retry hint after
+  construction, replacing the documented direct assignment); the
+  read-only identity-field contract documented in the package doc and on
+  every semantic type; and this amendment. The getter introduction moves
+  wholly into stage 3.
+- **Stage 3 gains** the accessor-method introduction (same commit as the
+  unexporting, by necessity) and a migration note in the v1 changelog
+  showing the `x.Field` → `x.Field()` rewrite.
+
 ## What this pass deliberately does not change
 
 The classification model (`outermostCoded`, one node drives everything),

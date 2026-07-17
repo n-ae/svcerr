@@ -542,10 +542,9 @@ func extractErrorDetails(err error) map[string]interface{} {
 			details["status_code"] = v.StatusCode
 		}
 		if v.RetryAfter != nil {
-			// Clamped like RateLimitError's: this field is documented for
-			// direct post-construction assignment, so no constructor ever
-			// vetted it. Also emitted as the Retry-After header - see
-			// retryAfterHeader.
+			// Clamped like RateLimitError's: SetRetryAfter clamps on the way
+			// in, but the field stays directly assignable until v1. Also
+			// emitted as the Retry-After header - see retryAfterHeader.
 			details["retry_after"] = clampRetryAfter(*v.RetryAfter)
 		}
 	case *NotFoundError:

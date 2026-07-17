@@ -426,13 +426,20 @@ func TestContractRetryAfterHeaders(t *testing.T) {
 		t.Errorf("rate limit Retry-After = %q, want 30", got)
 	}
 
-	retryAfter := 45
 	upstream := svcerr.NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
-	upstream.RetryAfter = &retryAfter
+	upstream.SetRetryAfter(45)
 	rec = httptest.NewRecorder()
 	svcerr.WriteJSON(rec, upstream)
 	if got := rec.Header().Get("Retry-After"); got != "45" {
 		t.Errorf("external API Retry-After = %q, want 45", got)
+	}
+
+	// The setter clamps a negative hint on the way in (RFC 9110 §10.2.3).
+	upstream.SetRetryAfter(-9)
+	rec = httptest.NewRecorder()
+	svcerr.WriteJSON(rec, upstream)
+	if got := rec.Header().Get("Retry-After"); got != "0" {
+		t.Errorf("clamped Retry-After = %q, want 0", got)
 	}
 }
 
