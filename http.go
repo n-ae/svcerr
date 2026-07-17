@@ -113,8 +113,13 @@ func HTTPStatusCode(code ErrorCode) int {
 // instead of returning it; the plain WriteJSON/WriteHTML/WriteProblem
 // functions discard it entirely, same as before this type existed.
 type WriteResult struct {
-	// Status is the HTTP status code actually sent - the fallback 500 on
-	// a marshal failure, not necessarily err's own classification.
+	// Status is the HTTP status code svcerr selected and passed to
+	// w.WriteHeader - the fallback 500 on a marshal failure, not
+	// necessarily err's own classification. It's what svcerr chose to
+	// send, not a transport confirmation that the client received exactly
+	// that status: a custom or third-party ResponseWriter could ignore it,
+	// have already committed a different status earlier, transform it, or
+	// panic during WriteHeader (see trackingResponseWriter.WriteHeader).
 	Status int
 	// RenderErr is the marshal error when the real body couldn't be
 	// JSON-encoded and a generic fallback was substituted instead (nil

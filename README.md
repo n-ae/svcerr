@@ -125,10 +125,15 @@ router.Use(svcerr.RecoveryMiddleware(h.logger))
 
 `RecoveryMiddleware` tracks whether the handler already wrote a response
 before panicking, and won't write an error body over one that's already
-committed - it just logs in that case. It also passes through
-`http.Flusher` and `http.Hijacker` when (and only when) the underlying
-`ResponseWriter` supports them, so SSE handlers and WebSocket upgrades
-still work for handlers wrapped by the middleware, and a handler's own
+committed - it logs, then re-panics with `http.ErrAbortHandler`, which
+closes the HTTP/1 connection (or resets the HTTP/2 stream) instead of
+letting net/http treat whatever partial bytes the handler wrote as a
+complete, successful response. An outer panic-recovery layer, if any, must
+not swallow `http.ErrAbortHandler` - `RecoveryMiddleware` should normally
+be the outermost one. It also passes through `http.Flusher` and
+`http.Hijacker` when (and only when) the underlying `ResponseWriter`
+supports them, so SSE handlers and WebSocket upgrades still work for
+handlers wrapped by the middleware, and a handler's own
 `w.(http.Flusher)`/`w.(http.Hijacker)` checks (or an
 `http.ResponseController`) get a truthful answer instead of the wrapper
 always claiming both regardless of what's underneath. A successful hijack
@@ -430,6 +435,16 @@ returns the status code used, without touching a logger:
 ```go
 statusCode := svcerr.WriteJSON(w, err) // no logging, no Logger argument
 myReporter.Report(r.Context(), err, statusCode)
+```
+
+That discards whether the body actually rendered and reached the client.
+Use `WriteJSONResult` (or `WriteHTMLResult`/`WriteProblemResult`) instead
+to see that too, so your reporter doesn't claim success when the client
+never got a valid response:
+
+```go
+result := svcerr.WriteJSONResult(w, err)
+myReporter.Report(r.Context(), err, result.Status, result.RenderErr, result.WriteErr)
 ```
 
 ## Origin
