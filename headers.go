@@ -201,13 +201,15 @@ func SetDefaultAuthenticateChallenge(challenge string) {
 // setAuthenticateChallenge sets the WWW-Authenticate header when
 // statusCode is 401: the challenge from node (the same outermost coded
 // node used for everything else in err's classification) via
-// Authenticator if it provides one, else the application-wide
-// SetDefaultAuthenticateChallenge value if set, else nothing - RFC 9110
-// §11.6.1 requires at least one WWW-Authenticate challenge on every 401
-// response, but this package has no way to invent an application's
-// authentication scheme or realm on its own, so both sources are opt-in.
-// Shared by all three response writers (JSON, HTML, problem+json).
-func setAuthenticateChallenge(h http.Header, statusCode int, node coderError) {
+// Authenticator if it provides one, else defaultChallenge if non-empty
+// (the SetDefaultAuthenticateChallenge value on the package-level render
+// path, or RendererConfig.DefaultAuthenticateChallenge on a Renderer's),
+// else nothing - RFC 9110 §11.6.1 requires at least one WWW-Authenticate
+// challenge on every 401 response, but this package has no way to invent
+// an application's authentication scheme or realm on its own, so both
+// sources are opt-in. Shared by all three response writers (JSON, HTML,
+// problem+json).
+func setAuthenticateChallenge(h http.Header, statusCode int, node coderError, defaultChallenge string) {
 	if statusCode != http.StatusUnauthorized {
 		return
 	}
@@ -217,10 +219,15 @@ func setAuthenticateChallenge(h http.Header, statusCode int, node coderError) {
 			return
 		}
 	}
-	defaultAuthMu.RLock()
-	challenge := defaultAuthChallenge
-	defaultAuthMu.RUnlock()
-	if challenge != "" {
-		h.Set("WWW-Authenticate", challenge)
+	if defaultChallenge != "" {
+		h.Set("WWW-Authenticate", defaultChallenge)
 	}
+}
+
+// currentDefaultAuthChallenge returns the application-wide challenge for
+// the package-level render path; a Renderer carries its own instead.
+func currentDefaultAuthChallenge() string {
+	defaultAuthMu.RLock()
+	defer defaultAuthMu.RUnlock()
+	return defaultAuthChallenge
 }

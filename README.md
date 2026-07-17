@@ -426,6 +426,44 @@ bare 401 (no `WWW-Authenticate`) is still possible; the package won't
 guess a scheme for you. `SetDefaultAuthenticateChallenge("")` clears the
 default.
 
+### Instance configuration: Renderer
+
+Everything the package-level configuration controls - status-code
+mapping, the default `WWW-Authenticate` challenge, both header policies -
+plus the logger can be scoped to an instance instead of the globals:
+
+```go
+r, err := svcerr.NewRenderer(svcerr.RendererConfig{
+	StatusCodes:                  map[svcerr.ErrorCode]int{ErrCodeOutOfStock: http.StatusConflict},
+	DefaultAuthenticateChallenge: `Bearer realm="api"`,
+	HeaderPolicy:                 svcerr.HeaderPolicy{KeepContentEncoding: true},
+	RecoveryHeaderPolicy:         svcerr.HeaderPolicy{},
+	Logger:                       logger,
+})
+if err != nil {
+	panic(err) // invalid config (e.g. a status outside 400-599) fails at startup
+}
+
+res := r.JSON(w, err)      // logs via the config Logger AND returns the WriteResult
+r.HTML(w, err)             // the WriteHTML rendering
+r.Problem(w, err)          // the RFC 9457 rendering
+router.Use(r.Middleware()) // RecoveryMiddleware under this config
+```
+
+Because each method both logs and reports, a `Renderer` collapses the
+package-level `WriteHTTPError`/`WriteJSON`/`WriteJSONResult` split into
+one call. Use it for tests, for processes hosting two differently
+configured services, or simply to avoid global state - the zero
+`RendererConfig` reproduces the package defaults with no logging.
+
+**A `Renderer` is fully self-contained.** The global configuration
+(`RegisterStatusCode`, `SetDefaultAuthenticateChallenge`,
+`SetHeaderPolicy`, `SetRecoveryHeaderPolicy`) does not affect it, and its
+own configuration never leaks to the package-level writers. If a library
+registers codes globally that this renderer should know, mirror them
+into `RendererConfig.StatusCodes`. The config is copied at construction
+and immutable from then on.
+
 ### Wrapping constructors in your own helper
 
 Every `New*`/`Wrap*` constructor assumes it's called directly from the site

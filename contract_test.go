@@ -366,6 +366,58 @@ func TestContractAuthenticateChallenge(t *testing.T) {
 	}
 }
 
+func TestContractRenderer(t *testing.T) {
+	// The instance-configuration surface added by the pre-v1 design pass
+	// (stage 1): a Renderer is constructed, used, and isolated purely
+	// through exported API.
+	logger := &contractLogger{}
+	r, err := svcerr.NewRenderer(svcerr.RendererConfig{
+		StatusCodes:                  map[svcerr.ErrorCode]int{"CONTRACT_RENDERER_CODE": http.StatusUnprocessableEntity},
+		DefaultAuthenticateChallenge: `Bearer realm="renderer"`,
+		HeaderPolicy:                 svcerr.HeaderPolicy{KeepContentEncoding: true},
+		Logger:                       logger,
+	})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Encoding", "gzip")
+	res := r.JSON(rec, svcerr.New("CONTRACT_RENDERER_CODE", "instance-mapped"))
+	if res.Status != http.StatusUnprocessableEntity || rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("Status = %d/%d, want the instance mapping's 422", res.Status, rec.Code)
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want preserved under the instance HeaderPolicy", got)
+	}
+	if res.BytesWritten != rec.Body.Len() {
+		t.Errorf("BytesWritten = %d, want %d", res.BytesWritten, rec.Body.Len())
+	}
+	if len(logger.entries) != 1 {
+		t.Errorf("logger entries = %d, want 1 - the config Logger receives render records", len(logger.entries))
+	}
+
+	rec = httptest.NewRecorder()
+	r.JSON(rec, svcerr.NewAuthenticationError("token_expired", "session expired"))
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="renderer"` {
+		t.Errorf("WWW-Authenticate = %q, want the instance default", got)
+	}
+
+	// Isolation both ways: the instance code means nothing to the
+	// package-level writers, and the instance challenge doesn't leak.
+	if got := svcerr.WriteJSON(httptest.NewRecorder(), svcerr.New("CONTRACT_RENDERER_CODE", "x")); got != http.StatusInternalServerError {
+		t.Errorf("package-level status = %d, want 500 - instance config must not leak", got)
+	}
+
+	// Middleware under the instance config recovers a panic.
+	handler := r.Middleware()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("recovered status = %d, want 500", rec.Code)
+	}
+}
+
 func TestContractRetryAfterHeaders(t *testing.T) {
 	// Both retry-hint-carrying types emit the standard header, clamped.
 	rec := httptest.NewRecorder()

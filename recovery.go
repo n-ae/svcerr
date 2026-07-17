@@ -2,8 +2,20 @@ package svcerr
 
 import "net/http"
 
-// Middleware for error recovery and logging
+// Middleware for error recovery and logging, using the package-level
+// configuration (global status registry, challenge default, and recovery
+// header policy, read at response time). A Renderer's Middleware method
+// provides the same behavior under that renderer's own immutable
+// configuration and logger.
 func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
+	return recoveryMiddleware(logger, defaultRecoverySettings)
+}
+
+// recoveryMiddleware is the shared implementation behind
+// RecoveryMiddleware and Renderer.Middleware. settings is called at
+// response-write time, so the package-level path observes startup-time
+// global reconfiguration while a Renderer supplies its fixed snapshot.
+func recoveryMiddleware(logger Logger, settings func() renderSettings) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			wrapped, tw := newTrackingResponseWriter(w)
@@ -76,7 +88,7 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 				// can't produce a marshal failure the way a caller's own
 				// SetPublicDetail could, so unlike WriteHTTPError there's
 				// no render error worth plumbing through here.
-				statusCode, bytesWritten, _, writeErr := writeJSONErrorBody(tw, err, currentRecoveryHeaderPolicy())
+				statusCode, bytesWritten, _, writeErr := writeJSONErrorBody(tw, err, settings())
 
 				_, fields := errorLogFields(err, statusCode)
 				fields["panic"] = rec

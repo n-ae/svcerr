@@ -212,3 +212,29 @@ func ExampleRecoveryMiddleware() {
 	// 500
 	// {"error":{"code":"INTERNAL_ERROR","message":"An internal error occurred. Please contact support if the problem persists."}}
 }
+
+// A Renderer scopes the package's configuration to an instance - status
+// codes, challenge default, header policies, and the logger in one
+// place - instead of the package-level globals. It's fully
+// self-contained: global configuration doesn't affect it, and two
+// differently configured Renderers can serve in the same process.
+func ExampleNewRenderer() {
+	r, err := svcerr.NewRenderer(svcerr.RendererConfig{
+		StatusCodes:                  map[svcerr.ErrorCode]int{"OUT_OF_CREDITS": http.StatusPaymentRequired},
+		DefaultAuthenticateChallenge: `Bearer realm="api"`,
+	})
+	if err != nil {
+		panic(err) // invalid config should fail loudly at startup
+	}
+
+	rec := httptest.NewRecorder()
+	res := r.JSON(rec, svcerr.New("OUT_OF_CREDITS", "credits exhausted"))
+	fmt.Println(res.Status)
+
+	rec = httptest.NewRecorder()
+	r.JSON(rec, svcerr.NewAuthenticationError("token_expired", "session expired"))
+	fmt.Println(rec.Header().Get("WWW-Authenticate"))
+	// Output:
+	// 402
+	// Bearer realm="api"
+}

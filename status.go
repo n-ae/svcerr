@@ -32,7 +32,10 @@ func RegisterStatusCode(code ErrorCode, status int) error {
 	return nil
 }
 
-// HTTPStatusCode maps error codes to HTTP status codes
+// HTTPStatusCode maps error codes to HTTP status codes: the
+// RegisterStatusCode registry first, then the built-in mapping. This is
+// the mapping the package-level writers use; a Renderer consults its own
+// StatusCodes instead of the registry (see RendererConfig).
 func HTTPStatusCode(code ErrorCode) int {
 	customStatusMu.RLock()
 	status, ok := customStatusCode[code]
@@ -40,7 +43,14 @@ func HTTPStatusCode(code ErrorCode) int {
 	if ok {
 		return status
 	}
+	return builtinStatusCode(code)
+}
 
+// builtinStatusCode is the registry-independent portion of
+// HTTPStatusCode: the package's built-in code-to-status mapping. Split
+// out so a Renderer can layer its own immutable StatusCodes over it
+// without consulting (or being affected by) the mutable global registry.
+func builtinStatusCode(code ErrorCode) int {
 	switch code {
 	// Validation errors -> 400 Bad Request
 	case ErrCodeInvalidInput, ErrCodeMissingRequired, ErrCodeInvalidFormat, ErrCodeConstraintViolation:
