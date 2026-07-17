@@ -4,7 +4,7 @@ package svcerr
 // the given status code. Shared by logError and RecoveryMiddleware, so a
 // recovered panic produces one log record carrying both the panic context
 // and the usual error fields, rather than each logging independently.
-func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
+func errorLogFields(err error, statusCode int) (Level, map[string]any) {
 	// Determine log level based on status code
 	level := LevelInfo
 	switch {
@@ -15,7 +15,7 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 	}
 
 	code := GetErrorCode(err)
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"error_code":  string(code),
 		"http_status": statusCode,
 	}
@@ -39,28 +39,26 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 	// DatabaseError's operation).
 	switch v := outermostCoded(err).(type) {
 	case *ValidationError:
-		fields["field"] = v.Field
+		fields["field"] = v.field
 	case *DatabaseError:
-		fields["db_operation"] = v.Operation
+		fields["db_operation"] = v.operation
 	case *ExternalAPIError:
-		fields["service"] = v.Service
-		fields["service_status"] = v.StatusCode
+		fields["service"] = v.service
+		fields["service_status"] = v.statusCode
 	case *AuthenticationError:
-		fields["auth_reason"] = v.Reason
+		fields["auth_reason"] = v.reason
 	case *NotFoundError:
-		fields["resource_type"] = v.ResourceType
-		fields["resource_id"] = v.ResourceID
+		fields["resource_type"] = v.resourceType
+		fields["resource_id"] = v.resourceID
 	case *ConflictError:
-		fields["resource_type"] = v.ResourceType
-		fields["conflict_key"] = v.ConflictKey
+		fields["resource_type"] = v.resourceType
+		fields["conflict_key"] = v.conflictKey
 	case *RateLimitError:
-		fields["service"] = v.Service
-		fields["limit"] = v.Limit
-		// Clamped to match what the response writers actually sent - see
-		// retryAfterHeader.
-		fields["retry_after"] = clampRetryAfter(v.RetryAfter)
+		fields["service"] = v.service
+		fields["limit"] = v.limit
+		fields["retry_after"] = v.retryAfter
 	case *InternalError:
-		fields["component"] = v.Component
+		fields["component"] = v.component
 	}
 
 	return level, fields
@@ -115,7 +113,7 @@ func logError(logger Logger, err error, statusCode int, renderErr, writeErr erro
 // nil-pointer panic. Callers who want response rendering with no logging
 // contract whatsoever can use WriteJSON/WriteHTML/WriteProblem directly
 // instead of passing nil here.
-func safeLog(logger Logger, level Level, err error, fields map[string]interface{}, msg string) {
+func safeLog(logger Logger, level Level, err error, fields map[string]any, msg string) {
 	if logger == nil {
 		return
 	}

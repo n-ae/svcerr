@@ -268,6 +268,42 @@ Resolutions:
   unexporting, by necessity) and a migration note in the v1 changelog
   showing the `x.Field` → `x.Field()` rewrite.
 
+## Amendment (2026-07-17): stage 3 executed
+
+Stage 3 shipped as planned with the following recorded specifics:
+
+- **Go floor raised to 1.21** (open question 3 resolved by the
+  maintainer): permits `maps.Clone` internally (now used by
+  `PublicDetails`); CI floor cells follow the go.mod directive
+  automatically.
+- **The 18 identity fields are unexported with bare same-name accessors**
+  per the stage-2 amendment. Two API-shape specifics decided during
+  execution: `ExternalAPIError.RetryAfter()` returns `(seconds int, ok
+  bool)` rather than exposing the internal pointer, and
+  **`AuthenticationError.SessionID` is removed** rather than unexported -
+  no constructor ever set it and no projection ever read it; it was an
+  inert write-only field that contradicted the identity model.
+- **`Context()` is derived, not snapshotted**, via per-type overrides.
+  Minor normalizations against the old snapshots, all in the direction
+  of consistency: `WrapValidationError`'s context now includes `value`
+  (nil) like the constructor's; `WrapDatabaseError`'s `query` is included
+  only when non-empty; `ExternalAPIError`'s context now includes
+  `retry_after` when a hint was recorded (previously never present -
+  the last remnant of the v0.6.4 M1 observation that `Context()` could
+  disagree with the response).
+- **Emission clamps removed** from `retryAfterHeader`,
+  `extractErrorDetails`, and `errorLogFields`; `clampRetryAfter` remains
+  at the two entry points (RateLimit constructors, `SetRetryAfter`),
+  where unexported fields make it a real invariant. The M1 regression
+  test is retargeted at the constructor invariant with the same
+  all-surfaces assertions.
+- **Soft deprecation** (doc guidance, not `// Deprecated:` markers) on
+  the `WriteHTTP*` and `*Result` triples, pointing at the Renderer
+  methods - formal markers would fire SA1019 across the package's own
+  test suite and every consumer for functions that remain fully
+  supported; removal stays a v2 question.
+- `interface{}` → `any` throughout the root module.
+
 ## What this pass deliberately does not change
 
 The classification model (`outermostCoded`, one node drives everything),

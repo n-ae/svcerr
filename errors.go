@@ -30,33 +30,35 @@
 //	return svcerr.Wrap(errors.Join(notFoundErr, cleanupErr),
 //		svcerr.ErrCodeInternal, "request processing failed")
 //
-// The exported identity fields on the semantic types (ValidationError.Field,
-// NotFoundError.ResourceID, RateLimitError.RetryAfter, and so on) are
-// constructor outputs and must be treated as read-only: the constructors
-// derive the error's code, message, and context from them once, so
-// assigning one after construction desynchronizes the classification
-// from what the response writers and log fields then report. The one
+// The semantic types' identity - a validation error's field, a
+// not-found error's resource ID, a rate limit's retry delay - is fixed
+// at construction and read through same-name accessor methods
+// (ValidationError.Field(), NotFoundError.ResourceID(),
+// RateLimitError.RetryAfter(), ...). Every projection of an error -
+// response details, headers, log fields, Context() - derives from that
+// one canonical state, so they can never disagree. The one
 // identity-adjacent value legitimately learned after construction - an
-// upstream retry hint - has a dedicated setter, ExternalAPIError.SetRetryAfter.
-// At v1 these fields become unexported with same-name accessor methods,
-// making the read-only contract compiler-enforced; migration is
-// mechanical (x.Field becomes x.Field()). See docs/v1-design-pass.md.
+// upstream retry hint - has a dedicated clamping setter,
+// ExternalAPIError.SetRetryAfter. (Before v1 these were exported
+// writable fields; the migration is mechanical - x.Field becomes
+// x.Field(). See docs/v1-design-pass.md.)
 //
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
-// SetProblemTitle, SetAuthenticateChallenge, and RecaptureStackTrace all
-// mutate the receiver in place with no locking, and the exported struct
-// fields on ValidationError, DatabaseError, and the other semantic types
-// are plain fields, not synchronized accessors. This is fine for the
-// normal pattern of
-// constructing and configuring an error locally before returning it, but
-// don't call these once an error might be read or mutated from another
-// goroutine (e.g. after handing it to a shared error-collection type).
+// SetProblemTitle, SetAuthenticateChallenge, SetRetryAfter, and
+// RecaptureStackTrace all mutate the receiver in place with no locking.
+// This is fine for the normal pattern of constructing and configuring an
+// error locally before returning it, but don't call these once an error
+// might be read or mutated from another goroutine (e.g. after handing it
+// to a shared error-collection type). Identity accessors (Field(),
+// ResourceID(), ...) are safe to call concurrently once construction and
+// configuration are done.
 package svcerr
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
 	"strings"
 )
@@ -135,7 +137,7 @@ type PublicMessager interface {
 // is sensitive). BaseError implements it via SetPublicDetail/
 // RemovePublicDetail.
 type PublicDetailer interface {
-	PublicDetails() (add map[string]interface{}, remove map[string]struct{})
+	PublicDetails() (add map[string]any, remove map[string]struct{})
 }
 
 // ProblemTyper is implemented by any error that specifies its own RFC 9457
@@ -202,9 +204,8 @@ type BaseError struct {
 	// runtime.Callers is far cheaper than symbolizing every frame eagerly
 	// on every single construction.
 	pcs                   []uintptr
-	context               map[string]interface{}
 	publicMessage         string
-	publicDetailAdditions map[string]interface{}
+	publicDetailAdditions map[string]any
 	publicDetailRemovals  map[string]struct{}
 	problemType           string
 	problemInstance       string
@@ -239,20 +240,17 @@ func (e *BaseError) StackTrace() []string {
 	return formatStackTrace(e.pcs)
 }
 
-// Context returns a shallow copy of the error context: callers can't add,
-// remove, or replace top-level keys in the error's internal map through
-// the returned one, but a value that's itself a map, slice, or pointer is
-// shared, not copied - mutating that value's contents still reaches into
-// the error.
-func (e *BaseError) Context() map[string]interface{} {
-	if e.context == nil {
-		return nil
-	}
-	ctx := make(map[string]interface{}, len(e.context))
-	for k, v := range e.context {
-		ctx[k] = v
-	}
-	return ctx
+// Context returns the error's identity as a structured map. Since v1 it
+// is derived on demand from the same canonical fields every other
+// projection (details, headers, log fields) uses, rather than snapshotted
+// at construction - each semantic type shadows this method with its own
+// derivation (see e.g. NotFoundError.Context), so the returned map can
+// never disagree with what the response writers report. BaseError itself
+// carries no identity beyond code and message, so for the generic New/
+// Wrap errors this returns nil, as it always has. Every call builds a
+// fresh map; mutating the result never reaches the error.
+func (e *BaseError) Context() map[string]any {
+	return nil
 }
 
 // SetPublicMessage overrides the message WriteHTTPError, WriteHTTPErrorHTML,
@@ -290,10 +288,10 @@ func (e *BaseError) PublicMessage() (string, bool) {
 // member's slot. To set the real members, use SetProblemType,
 // SetProblemTitle, and SetProblemInstance; status, detail, and code
 // always come from the error's own classification.
-func (e *BaseError) SetPublicDetail(key string, value interface{}) {
+func (e *BaseError) SetPublicDetail(key string, value any) {
 	delete(e.publicDetailRemovals, key)
 	if e.publicDetailAdditions == nil {
-		e.publicDetailAdditions = map[string]interface{}{}
+		e.publicDetailAdditions = map[string]any{}
 	}
 	e.publicDetailAdditions[key] = value
 }
@@ -321,22 +319,8 @@ func (e *BaseError) RemovePublicDetail(key string) {
 // which also keep the two maps' last-call-wins bookkeeping intact - but
 // an addition value that's itself a map, slice, or pointer is shared,
 // not copied.
-func (e *BaseError) PublicDetails() (add map[string]interface{}, remove map[string]struct{}) {
-	// maps.Clone would do this, but it was added in Go 1.21 and this
-	// module's floor is Go 1.20.
-	if e.publicDetailAdditions != nil {
-		add = make(map[string]interface{}, len(e.publicDetailAdditions))
-		for k, v := range e.publicDetailAdditions {
-			add[k] = v
-		}
-	}
-	if e.publicDetailRemovals != nil {
-		remove = make(map[string]struct{}, len(e.publicDetailRemovals))
-		for k := range e.publicDetailRemovals {
-			remove[k] = struct{}{}
-		}
-	}
-	return add, remove
+func (e *BaseError) PublicDetails() (add map[string]any, remove map[string]struct{}) {
+	return maps.Clone(e.publicDetailAdditions), maps.Clone(e.publicDetailRemovals)
 }
 
 // SetProblemType overrides the RFC 9457 "type" URI WriteHTTPProblem sends
@@ -533,26 +517,38 @@ func Wrap(err error, code ErrorCode, message string) *BaseError {
 // ValidationError represents input validation errors
 type ValidationError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	Field string
-	Value interface{}
+	field string
+	value any
+}
+
+// Field returns the input field this validation error describes.
+func (e *ValidationError) Field() string { return e.field }
+
+// Value returns the offending input value, when the constructor was
+// given one - never rendered to clients (see extractErrorDetails), but
+// available to callers for their own handling.
+func (e *ValidationError) Value() any { return e.value }
+
+// Context returns this error's identity as a fresh map - field and
+// value - derived on demand from the same canonical state every other
+// projection uses.
+func (e *ValidationError) Context() map[string]any {
+	return map[string]any{
+		"field": e.field,
+		"value": e.value,
+	}
 }
 
 // NewValidationError creates a new validation error
-func NewValidationError(message string, field string, value interface{}) *ValidationError {
+func NewValidationError(message string, field string, value any) *ValidationError {
 	return &ValidationError{
 		BaseError: BaseError{
 			code:    ErrCodeInvalidInput,
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"field": field,
-				"value": value,
-			},
 		},
-		Field: field,
-		Value: value,
+		field: field,
+		value: value,
 	}
 }
 
@@ -564,21 +560,34 @@ func WrapValidationError(err error, message string, field string) *ValidationErr
 			message: message,
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"field": field,
-			},
 		},
-		Field: field,
+		field: field,
 	}
 }
 
 // DatabaseError represents database operation errors
 type DatabaseError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	Operation string // "query", "insert", "update", "delete", "transaction", "migration"
-	Query     string
+	operation string
+	query     string
+}
+
+// Operation returns the database operation this error describes -
+// "query", "insert", "update", "delete", "transaction", "migration".
+func (e *DatabaseError) Operation() string { return e.operation }
+
+// Query returns the SQL text WrapDatabaseError recorded, or "" - never
+// rendered to clients (see extractErrorDetails and errorLogFields).
+func (e *DatabaseError) Query() string { return e.query }
+
+// Context returns this error's identity as a fresh map - operation, and
+// query when one was recorded.
+func (e *DatabaseError) Context() map[string]any {
+	ctx := map[string]any{"operation": e.operation}
+	if e.query != "" {
+		ctx["query"] = e.query
+	}
+	return ctx
 }
 
 // databaseErrorCode maps a DatabaseError's Operation to its ErrorCode -
@@ -606,11 +615,8 @@ func NewDatabaseError(operation, message string) *DatabaseError {
 			code:    databaseErrorCode(operation),
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"operation": operation,
-			},
 		},
-		Operation: operation,
+		operation: operation,
 	}
 }
 
@@ -622,32 +628,55 @@ func WrapDatabaseError(err error, operation, query string) *DatabaseError {
 			message: fmt.Sprintf("database %s failed", operation),
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"operation": operation,
-				"query":     query,
-			},
 		},
-		Operation: operation,
-		Query:     query,
+		operation: operation,
+		query:     query,
 	}
 }
 
 // ExternalAPIError represents errors from external APIs
 type ExternalAPIError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	Service    string // caller-defined service name, e.g. "yahoo", "nba_stats"
-	StatusCode int
-	URL        string
-	// RetryAfter is seconds to retry after, e.g. propagated from the
-	// upstream's own Retry-After. Not set by the constructors - use
-	// SetRetryAfter when the hint is known, which clamps to non-negative
-	// (RFC 9110 §10.2.3); direct assignment bypasses that clamp and is
-	// deprecated ahead of v1, when this field becomes unexported. When
-	// set, the response writers emit it as the Retry-After header and the
-	// retry_after details member, re-clamped at emission.
-	RetryAfter *int
+	service    string
+	statusCode int
+	url        string
+	retryAfter *int
+}
+
+// Service returns the caller-defined upstream service name, e.g.
+// "yahoo", "nba_stats".
+func (e *ExternalAPIError) Service() string { return e.service }
+
+// StatusCode returns the upstream's HTTP status, or 0 when unknown.
+func (e *ExternalAPIError) StatusCode() int { return e.statusCode }
+
+// URL returns the upstream URL the constructor recorded - never
+// rendered to clients (see extractErrorDetails and errorLogFields).
+func (e *ExternalAPIError) URL() string { return e.url }
+
+// RetryAfter returns the upstream retry hint SetRetryAfter recorded, in
+// seconds, and whether one was recorded at all. The stored value is
+// always a valid non-negative delay-seconds - SetRetryAfter clamps on
+// the way in, and nothing can mutate it afterward.
+func (e *ExternalAPIError) RetryAfter() (seconds int, ok bool) {
+	if e.retryAfter == nil {
+		return 0, false
+	}
+	return *e.retryAfter, true
+}
+
+// Context returns this error's identity as a fresh map - service,
+// status_code, url, and retry_after when a hint was recorded.
+func (e *ExternalAPIError) Context() map[string]any {
+	ctx := map[string]any{
+		"service":     e.service,
+		"status_code": e.statusCode,
+		"url":         e.url,
+	}
+	if e.retryAfter != nil {
+		ctx["retry_after"] = *e.retryAfter
+	}
+	return ctx
 }
 
 // NewExternalAPIError creates a new external API error
@@ -657,15 +686,10 @@ func NewExternalAPIError(service, message string, statusCode int, url string) *E
 			code:    ErrCodeExternalAPI,
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"service":     service,
-				"status_code": statusCode,
-				"url":         url,
-			},
 		},
-		Service:    service,
-		StatusCode: statusCode,
-		URL:        url,
+		service:    service,
+		statusCode: statusCode,
+		url:        url,
 	}
 }
 
@@ -677,35 +701,38 @@ func WrapExternalAPIError(err error, service, url string, statusCode int) *Exter
 			message: fmt.Sprintf("%s API call failed", service),
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"service":     service,
-				"url":         url,
-				"status_code": statusCode,
-			},
 		},
-		Service:    service,
-		StatusCode: statusCode,
-		URL:        url,
+		service:    service,
+		statusCode: statusCode,
+		url:        url,
 	}
 }
 
 // SetRetryAfter records an upstream retry hint of seconds (e.g. parsed
 // from the upstream's own Retry-After), clamped to non-negative per RFC
-// 9110 §10.2.3 - the sanctioned way to attach the hint after
-// construction, since no constructor takes it. The response writers then
-// emit it as the Retry-After header and the retry_after details member.
+// 9110 §10.2.3 - the only way to attach the hint, since no constructor
+// takes it. The response writers then emit it as the Retry-After header
+// and the retry_after details member; RetryAfter() reads it back.
 func (e *ExternalAPIError) SetRetryAfter(seconds int) {
 	seconds = clampRetryAfter(seconds)
-	e.RetryAfter = &seconds
+	e.retryAfter = &seconds
 }
 
 // AuthenticationError represents authentication and authorization errors
 type AuthenticationError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	SessionID string
-	Reason    string // "token_expired", "token_invalid", "permission_denied"
+	reason string
+}
+
+// Reason returns the authentication failure reason the constructor
+// derived this error's code from - "token_expired", "token_invalid",
+// "permission_denied", or any other caller-chosen string (which maps to
+// ErrCodeUnauthorized).
+func (e *AuthenticationError) Reason() string { return e.reason }
+
+// Context returns this error's identity as a fresh map - reason.
+func (e *AuthenticationError) Context() map[string]any {
+	return map[string]any{"reason": e.reason}
 }
 
 // authenticationErrorCode maps an AuthenticationError's Reason to its
@@ -734,11 +761,8 @@ func NewAuthenticationError(reason, message string) *AuthenticationError {
 			code:    authenticationErrorCode(reason),
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"reason": reason,
-			},
 		},
-		Reason: reason,
+		reason: reason,
 	}
 }
 
@@ -754,21 +778,35 @@ func WrapAuthenticationError(err error, reason, message string) *AuthenticationE
 			message: message,
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"reason": reason,
-			},
 		},
-		Reason: reason,
+		reason: reason,
 	}
 }
 
 // NotFoundError represents resource not found errors
 type NotFoundError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	ResourceType string
-	ResourceID   string
+	resourceType string
+	resourceID   string
+}
+
+// ResourceType returns the kind of resource that wasn't found, e.g.
+// "league", "user".
+func (e *NotFoundError) ResourceType() string { return e.resourceType }
+
+// ResourceID returns the identifier that wasn't found. It's included in
+// the response details and the error message by default - see
+// RemovePublicDetail and SetPublicMessage when the identifier itself is
+// sensitive.
+func (e *NotFoundError) ResourceID() string { return e.resourceID }
+
+// Context returns this error's identity as a fresh map - resource_type
+// and resource_id.
+func (e *NotFoundError) Context() map[string]any {
+	return map[string]any{
+		"resource_type": e.resourceType,
+		"resource_id":   e.resourceID,
+	}
 }
 
 // NewNotFoundError creates a new not found error
@@ -778,13 +816,9 @@ func NewNotFoundError(resourceType, resourceID string) *NotFoundError {
 			code:    ErrCodeNotFound,
 			message: fmt.Sprintf("%s not found: %s", resourceType, resourceID),
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"resource_type": resourceType,
-				"resource_id":   resourceID,
-			},
 		},
-		ResourceType: resourceType,
-		ResourceID:   resourceID,
+		resourceType: resourceType,
+		resourceID:   resourceID,
 	}
 }
 
@@ -800,23 +834,32 @@ func WrapNotFoundError(err error, resourceType, resourceID string) *NotFoundErro
 			message: fmt.Sprintf("%s not found: %s", resourceType, resourceID),
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"resource_type": resourceType,
-				"resource_id":   resourceID,
-			},
 		},
-		ResourceType: resourceType,
-		ResourceID:   resourceID,
+		resourceType: resourceType,
+		resourceID:   resourceID,
 	}
 }
 
 // ConflictError represents resource conflict errors
 type ConflictError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	ResourceType string
-	ConflictKey  string
+	resourceType string
+	conflictKey  string
+}
+
+// ResourceType returns the kind of resource in conflict, e.g. "user".
+func (e *ConflictError) ResourceType() string { return e.resourceType }
+
+// ConflictKey returns the conflicting key or constraint, e.g. "email".
+func (e *ConflictError) ConflictKey() string { return e.conflictKey }
+
+// Context returns this error's identity as a fresh map - resource_type
+// and conflict_key.
+func (e *ConflictError) Context() map[string]any {
+	return map[string]any{
+		"resource_type": e.resourceType,
+		"conflict_key":  e.conflictKey,
+	}
 }
 
 // NewConflictError creates a new conflict error
@@ -826,13 +869,9 @@ func NewConflictError(resourceType, conflictKey, message string) *ConflictError 
 			code:    ErrCodeAlreadyExists,
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"resource_type": resourceType,
-				"conflict_key":  conflictKey,
-			},
 		},
-		ResourceType: resourceType,
-		ConflictKey:  conflictKey,
+		resourceType: resourceType,
+		conflictKey:  conflictKey,
 	}
 }
 
@@ -847,36 +886,50 @@ func WrapConflictError(err error, resourceType, conflictKey, message string) *Co
 			message: message,
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"resource_type": resourceType,
-				"conflict_key":  conflictKey,
-			},
 		},
-		ResourceType: resourceType,
-		ConflictKey:  conflictKey,
+		resourceType: resourceType,
+		conflictKey:  conflictKey,
 	}
 }
 
 // RateLimitError represents rate limiting errors
 type RateLimitError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	Service    string
-	Limit      int
-	RetryAfter int // seconds
+	service    string
+	limit      int
+	retryAfter int
+}
+
+// Service returns the rate-limited service name.
+func (e *RateLimitError) Service() string { return e.service }
+
+// Limit returns the request limit that was exceeded.
+func (e *RateLimitError) Limit() int { return e.limit }
+
+// RetryAfter returns the retry delay in seconds. The stored value is
+// always a valid non-negative delay-seconds (RFC 9110 §10.2.3) - the
+// constructors clamp on the way in, and nothing can mutate it
+// afterward.
+func (e *RateLimitError) RetryAfter() int { return e.retryAfter }
+
+// Context returns this error's identity as a fresh map - service,
+// limit, and retry_after.
+func (e *RateLimitError) Context() map[string]any {
+	return map[string]any{
+		"service":     e.service,
+		"limit":       e.limit,
+		"retry_after": e.retryAfter,
+	}
 }
 
 // clampRetryAfter floors retryAfter at 0. RFC 9110 §10.2.3 defines
 // Retry-After as a non-negative delay-seconds (or an HTTP-date), so a
-// negative value is never valid on the wire. It's applied twice: at
-// construction, so the stored RetryAfter field and the "retry_after"
-// context entry start out valid, and again at emission
-// (retryAfterHeader, extractErrorDetails, errorLogFields) -
-// RetryAfter is an exported, writable field, so the construction-time
-// clamp is input cleanup, not an enforced invariant, and a negative
-// value assigned after construction would otherwise go straight into the
-// header via fmt.Sprintf("%d", ...) with no downstream validation.
+// negative value is never valid on the wire. Applied at the only two
+// entry points - the RateLimitError constructors and
+// ExternalAPIError.SetRetryAfter - which, with the fields unexported
+// since v1, makes non-negativity a real invariant of the stored value:
+// the emission paths (retryAfterHeader, extractErrorDetails,
+// errorLogFields) trust it and no longer re-clamp.
 func clampRetryAfter(retryAfter int) int {
 	if retryAfter < 0 {
 		return 0
@@ -892,15 +945,10 @@ func NewRateLimitError(service string, limit, retryAfter int) *RateLimitError {
 			code:    ErrCodeRateLimitExceeded,
 			message: fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"service":     service,
-				"limit":       limit,
-				"retry_after": retryAfter,
-			},
 		},
-		Service:    service,
-		Limit:      limit,
-		RetryAfter: retryAfter,
+		service:    service,
+		limit:      limit,
+		retryAfter: retryAfter,
 	}
 }
 
@@ -916,24 +964,27 @@ func WrapRateLimitError(err error, service string, limit, retryAfter int) *RateL
 			message: fmt.Sprintf("rate limit exceeded for %s: %d requests", service, limit),
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"service":     service,
-				"limit":       limit,
-				"retry_after": retryAfter,
-			},
 		},
-		Service:    service,
-		Limit:      limit,
-		RetryAfter: retryAfter,
+		service:    service,
+		limit:      limit,
+		retryAfter: retryAfter,
 	}
 }
 
 // InternalError represents unexpected internal errors
 type InternalError struct {
 	BaseError
-	// Read-only identity fields - see the package doc's identity-field
-	// note; same-name accessor methods replace them at v1.
-	Component string
+	component string
+}
+
+// Component returns the component the failure is attributed to, e.g.
+// "billing" - also carried into the structured log fields on 5xx
+// responses.
+func (e *InternalError) Component() string { return e.component }
+
+// Context returns this error's identity as a fresh map - component.
+func (e *InternalError) Context() map[string]any {
+	return map[string]any{"component": e.component}
 }
 
 // NewInternalError creates a new internal error
@@ -943,11 +994,8 @@ func NewInternalError(component, message string) *InternalError {
 			code:    ErrCodeInternal,
 			message: message,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"component": component,
-			},
 		},
-		Component: component,
+		component: component,
 	}
 }
 
@@ -959,11 +1007,8 @@ func WrapInternalError(err error, component, message string) *InternalError {
 			message: message,
 			cause:   err,
 			pcs:     captureStackTrace(2),
-			context: map[string]interface{}{
-				"component": component,
-			},
 		},
-		Component: component,
+		component: component,
 	}
 }
 

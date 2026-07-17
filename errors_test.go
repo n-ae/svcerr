@@ -12,7 +12,7 @@ func TestValidationError(t *testing.T) {
 	tests := []struct {
 		name      string
 		field     string
-		value     interface{}
+		value     any
 		wantCode  ErrorCode
 		wantField string
 	}{
@@ -40,8 +40,8 @@ func TestValidationError(t *testing.T) {
 				t.Errorf("Code() = %v, want %v", err.Code(), tt.wantCode)
 			}
 
-			if err.Field != tt.wantField {
-				t.Errorf("Field = %v, want %v", err.Field, tt.wantField)
+			if err.Field() != tt.wantField {
+				t.Errorf("Field = %v, want %v", err.Field(), tt.wantField)
 			}
 
 			if err.Error() == "" {
@@ -64,8 +64,8 @@ func TestWrapValidationError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeInvalidInput)
 	}
 
-	if wrappedErr.Field != "user_id" {
-		t.Errorf("Field = %v, want user_id", wrappedErr.Field)
+	if wrappedErr.Field() != "user_id" {
+		t.Errorf("Field = %v, want user_id", wrappedErr.Field())
 	}
 
 	// Check error wrapping works
@@ -108,8 +108,8 @@ func TestDatabaseError(t *testing.T) {
 				t.Errorf("Code() = %v, want %v", err.Code(), tt.wantCode)
 			}
 
-			if err.Operation != tt.operation {
-				t.Errorf("Operation = %v, want %v", err.Operation, tt.operation)
+			if err.Operation() != tt.operation {
+				t.Errorf("Operation = %v, want %v", err.Operation(), tt.operation)
 			}
 		})
 	}
@@ -123,12 +123,12 @@ func TestWrapDatabaseError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeDatabaseQuery)
 	}
 
-	if wrappedErr.Operation != "query" {
-		t.Errorf("Operation = %v, want query", wrappedErr.Operation)
+	if wrappedErr.Operation() != "query" {
+		t.Errorf("Operation = %v, want query", wrappedErr.Operation())
 	}
 
-	if wrappedErr.Query != "SELECT * FROM leagues" {
-		t.Errorf("Query = %v, want SELECT * FROM leagues", wrappedErr.Query)
+	if wrappedErr.Query() != "SELECT * FROM leagues" {
+		t.Errorf("Query = %v, want SELECT * FROM leagues", wrappedErr.Query())
 	}
 
 	if !errors.Is(wrappedErr, originalErr) {
@@ -168,16 +168,16 @@ func TestExternalAPIError(t *testing.T) {
 				t.Errorf("Code() = %v, want %v", err.Code(), tt.wantCode)
 			}
 
-			if err.Service != tt.service {
-				t.Errorf("Service = %v, want %v", err.Service, tt.service)
+			if err.Service() != tt.service {
+				t.Errorf("Service = %v, want %v", err.Service(), tt.service)
 			}
 
-			if err.StatusCode != tt.statusCode {
-				t.Errorf("StatusCode = %v, want %v", err.StatusCode, tt.statusCode)
+			if err.StatusCode() != tt.statusCode {
+				t.Errorf("StatusCode = %v, want %v", err.StatusCode(), tt.statusCode)
 			}
 
-			if err.URL != tt.url {
-				t.Errorf("URL = %v, want %v", err.URL, tt.url)
+			if err.URL() != tt.url {
+				t.Errorf("URL = %v, want %v", err.URL(), tt.url)
 			}
 		})
 	}
@@ -190,14 +190,14 @@ func TestWrapExternalAPIError(t *testing.T) {
 	if wrappedErr.Code() != ErrCodeExternalAPI {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeExternalAPI)
 	}
-	if wrappedErr.Service != "yahoo" {
-		t.Errorf("Service = %v, want yahoo", wrappedErr.Service)
+	if wrappedErr.Service() != "yahoo" {
+		t.Errorf("Service = %v, want yahoo", wrappedErr.Service())
 	}
-	if wrappedErr.StatusCode != 503 {
-		t.Errorf("StatusCode = %v, want 503", wrappedErr.StatusCode)
+	if wrappedErr.StatusCode() != 503 {
+		t.Errorf("StatusCode = %v, want 503", wrappedErr.StatusCode())
 	}
-	if wrappedErr.URL != "https://fantasysports.yahooapis.com/..." {
-		t.Errorf("URL = %v, want the yahoo URL", wrappedErr.URL)
+	if wrappedErr.URL() != "https://fantasysports.yahooapis.com/..." {
+		t.Errorf("URL = %v, want the yahoo URL", wrappedErr.URL())
 	}
 	if !errors.Is(wrappedErr, originalErr) {
 		t.Error("errors.Is() failed")
@@ -240,8 +240,8 @@ func TestAuthenticationError(t *testing.T) {
 				t.Errorf("Code() = %v, want %v", err.Code(), tt.wantCode)
 			}
 
-			if err.Reason != tt.reason {
-				t.Errorf("Reason = %v, want %v", err.Reason, tt.reason)
+			if err.Reason() != tt.reason {
+				t.Errorf("Reason = %v, want %v", err.Reason(), tt.reason)
 			}
 		})
 	}
@@ -266,8 +266,8 @@ func TestWrapAuthenticationError(t *testing.T) {
 			if wrappedErr.Code() != tt.wantCode {
 				t.Errorf("Code() = %v, want %v", wrappedErr.Code(), tt.wantCode)
 			}
-			if wrappedErr.Reason != tt.reason {
-				t.Errorf("Reason = %v, want %v", wrappedErr.Reason, tt.reason)
+			if wrappedErr.Reason() != tt.reason {
+				t.Errorf("Reason = %v, want %v", wrappedErr.Reason(), tt.reason)
 			}
 			if !errors.Is(wrappedErr, originalErr) {
 				t.Error("errors.Is() failed, wrapping not working")
@@ -290,12 +290,12 @@ func TestNotFoundError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeNotFound)
 	}
 
-	if err.ResourceType != "league" {
-		t.Errorf("ResourceType = %v, want league", err.ResourceType)
+	if err.ResourceType() != "league" {
+		t.Errorf("ResourceType = %v, want league", err.ResourceType())
 	}
 
-	if err.ResourceID != "12345" {
-		t.Errorf("ResourceID = %v, want 12345", err.ResourceID)
+	if err.ResourceID() != "12345" {
+		t.Errorf("ResourceID = %v, want 12345", err.ResourceID())
 	}
 
 	expectedMsg := "league not found: 12345"
@@ -311,11 +311,11 @@ func TestWrapNotFoundError(t *testing.T) {
 	if wrappedErr.Code() != ErrCodeNotFound {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeNotFound)
 	}
-	if wrappedErr.ResourceType != "user" {
-		t.Errorf("ResourceType = %v, want user", wrappedErr.ResourceType)
+	if wrappedErr.ResourceType() != "user" {
+		t.Errorf("ResourceType = %v, want user", wrappedErr.ResourceType())
 	}
-	if wrappedErr.ResourceID != "42" {
-		t.Errorf("ResourceID = %v, want 42", wrappedErr.ResourceID)
+	if wrappedErr.ResourceID() != "42" {
+		t.Errorf("ResourceID = %v, want 42", wrappedErr.ResourceID())
 	}
 	if !errors.Is(wrappedErr, originalErr) {
 		t.Error("errors.Is() failed, wrapping not working")
@@ -336,12 +336,12 @@ func TestConflictError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeAlreadyExists)
 	}
 
-	if err.ResourceType != "team" {
-		t.Errorf("ResourceType = %v, want team", err.ResourceType)
+	if err.ResourceType() != "team" {
+		t.Errorf("ResourceType = %v, want team", err.ResourceType())
 	}
 
-	if err.ConflictKey != "team_key" {
-		t.Errorf("ConflictKey = %v, want team_key", err.ConflictKey)
+	if err.ConflictKey() != "team_key" {
+		t.Errorf("ConflictKey = %v, want team_key", err.ConflictKey())
 	}
 }
 
@@ -352,11 +352,11 @@ func TestWrapConflictError(t *testing.T) {
 	if wrappedErr.Code() != ErrCodeAlreadyExists {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeAlreadyExists)
 	}
-	if wrappedErr.ResourceType != "team" {
-		t.Errorf("ResourceType = %v, want team", wrappedErr.ResourceType)
+	if wrappedErr.ResourceType() != "team" {
+		t.Errorf("ResourceType = %v, want team", wrappedErr.ResourceType())
 	}
-	if wrappedErr.ConflictKey != "team_key" {
-		t.Errorf("ConflictKey = %v, want team_key", wrappedErr.ConflictKey)
+	if wrappedErr.ConflictKey() != "team_key" {
+		t.Errorf("ConflictKey = %v, want team_key", wrappedErr.ConflictKey())
 	}
 	if !errors.Is(wrappedErr, originalErr) {
 		t.Error("errors.Is() failed, wrapping not working")
@@ -373,24 +373,24 @@ func TestRateLimitError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeRateLimitExceeded)
 	}
 
-	if err.Service != "yahoo" {
-		t.Errorf("Service = %v, want yahoo", err.Service)
+	if err.Service() != "yahoo" {
+		t.Errorf("Service = %v, want yahoo", err.Service())
 	}
 
-	if err.Limit != 300 {
-		t.Errorf("Limit = %v, want 300", err.Limit)
+	if err.Limit() != 300 {
+		t.Errorf("Limit = %v, want 300", err.Limit())
 	}
 
-	if err.RetryAfter != 60 {
-		t.Errorf("RetryAfter = %v, want 60", err.RetryAfter)
+	if err.RetryAfter() != 60 {
+		t.Errorf("RetryAfter = %v, want 60", err.RetryAfter())
 	}
 }
 
 func TestRateLimitErrorClampsNegativeRetryAfter(t *testing.T) {
 	err := NewRateLimitError("yahoo", 300, -1)
 
-	if err.RetryAfter != 0 {
-		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", err.RetryAfter)
+	if err.RetryAfter() != 0 {
+		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", err.RetryAfter())
 	}
 	if err.Context()["retry_after"] != 0 {
 		t.Errorf(`Context()["retry_after"] = %v, want 0, to stay consistent with the clamped RetryAfter field`, err.Context()["retry_after"])
@@ -404,14 +404,14 @@ func TestWrapRateLimitError(t *testing.T) {
 	if wrappedErr.Code() != ErrCodeRateLimitExceeded {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeRateLimitExceeded)
 	}
-	if wrappedErr.Service != "yahoo" {
-		t.Errorf("Service = %v, want yahoo", wrappedErr.Service)
+	if wrappedErr.Service() != "yahoo" {
+		t.Errorf("Service = %v, want yahoo", wrappedErr.Service())
 	}
-	if wrappedErr.Limit != 300 {
-		t.Errorf("Limit = %v, want 300", wrappedErr.Limit)
+	if wrappedErr.Limit() != 300 {
+		t.Errorf("Limit = %v, want 300", wrappedErr.Limit())
 	}
-	if wrappedErr.RetryAfter != 60 {
-		t.Errorf("RetryAfter = %v, want 60", wrappedErr.RetryAfter)
+	if wrappedErr.RetryAfter() != 60 {
+		t.Errorf("RetryAfter = %v, want 60", wrappedErr.RetryAfter())
 	}
 	if !errors.Is(wrappedErr, originalErr) {
 		t.Error("errors.Is() failed, wrapping not working")
@@ -424,8 +424,8 @@ func TestWrapRateLimitError(t *testing.T) {
 func TestWrapRateLimitErrorClampsNegativeRetryAfter(t *testing.T) {
 	wrappedErr := WrapRateLimitError(errors.New("redis: connection refused"), "yahoo", 300, -5)
 
-	if wrappedErr.RetryAfter != 0 {
-		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", wrappedErr.RetryAfter)
+	if wrappedErr.RetryAfter() != 0 {
+		t.Errorf("RetryAfter = %v, want 0 (a negative value is not a valid Retry-After delay-seconds)", wrappedErr.RetryAfter())
 	}
 }
 
@@ -436,8 +436,8 @@ func TestInternalError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", err.Code(), ErrCodeInternal)
 	}
 
-	if err.Component != "optimizer" {
-		t.Errorf("Component = %v, want optimizer", err.Component)
+	if err.Component() != "optimizer" {
+		t.Errorf("Component = %v, want optimizer", err.Component())
 	}
 }
 
@@ -449,8 +449,8 @@ func TestWrapInternalError(t *testing.T) {
 		t.Errorf("Code() = %v, want %v", wrappedErr.Code(), ErrCodeInternal)
 	}
 
-	if wrappedErr.Component != "handler" {
-		t.Errorf("Component = %v, want handler", wrappedErr.Component)
+	if wrappedErr.Component() != "handler" {
+		t.Errorf("Component = %v, want handler", wrappedErr.Component())
 	}
 
 	if !errors.Is(wrappedErr, originalErr) {
@@ -508,7 +508,7 @@ func TestErrorTypeChecking(t *testing.T) {
 	tests := []struct {
 		name       string
 		err        error
-		target     interface{}
+		target     any
 		shouldPass bool
 	}{
 		{
@@ -707,8 +707,8 @@ func TestErrorWrapping(t *testing.T) {
 		t.Error("errors.As() failed to extract DatabaseError")
 	}
 
-	if dbErr.Operation != "query" {
-		t.Errorf("DatabaseError.Operation = %v, want query", dbErr.Operation)
+	if dbErr.Operation() != "query" {
+		t.Errorf("DatabaseError.Operation() = %v, want query", dbErr.Operation())
 	}
 }
 
@@ -1103,8 +1103,8 @@ func TestHTTPHelpersUnwrapWrappedErrors(t *testing.T) {
 		t.Errorf("extractErrorDetails()[\"field\"] = %v, want email", details["field"])
 	}
 
-	var loggedFields map[string]interface{}
-	logError(loggerFunc(func(_ Level, _ error, fields map[string]interface{}, _ string) {
+	var loggedFields map[string]any
+	logError(loggerFunc(func(_ Level, _ error, fields map[string]any, _ string) {
 		loggedFields = fields
 	}), wrapped, http.StatusBadRequest, nil, nil, 0)
 
@@ -1131,9 +1131,9 @@ func TestUserMessage(t *testing.T) {
 }
 
 // loggerFunc adapts a plain function to the Logger interface for tests.
-type loggerFunc func(level Level, err error, fields map[string]interface{}, msg string)
+type loggerFunc func(level Level, err error, fields map[string]any, msg string)
 
-func (f loggerFunc) Log(level Level, err error, fields map[string]interface{}, msg string) {
+func (f loggerFunc) Log(level Level, err error, fields map[string]any, msg string) {
 	f(level, err, fields, msg)
 }
 
@@ -1211,33 +1211,128 @@ func TestJoinedErrorClassificationIsChildOrderDependent(t *testing.T) {
 	}
 }
 
-// TestExternalAPIErrorSetRetryAfter covers the stage-2 setter: the
-// sanctioned way to attach an upstream retry hint after construction,
-// clamping on the way in so the stored value is always a valid
-// delay-seconds - unlike direct field assignment, which stays possible
-// (and unclamped at rest) only until v1 unexports the field.
+// TestExternalAPIErrorSetRetryAfter covers the only way to attach an
+// upstream retry hint: the setter clamps on the way in, and since v1 the
+// field is unexported, so a valid non-negative stored value is a real
+// invariant the emission paths trust without re-clamping.
 func TestExternalAPIErrorSetRetryAfter(t *testing.T) {
 	err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
-	if err.RetryAfter != nil {
-		t.Fatalf("RetryAfter = %v, want nil before any hint is recorded", *err.RetryAfter)
+	if _, ok := err.RetryAfter(); ok {
+		t.Fatal("RetryAfter() reported a hint before any was recorded")
 	}
 
 	err.SetRetryAfter(30)
-	if err.RetryAfter == nil || *err.RetryAfter != 30 {
-		t.Fatalf("RetryAfter = %v, want 30", err.RetryAfter)
+	if got, ok := err.RetryAfter(); !ok || got != 30 {
+		t.Fatalf("RetryAfter() = %d, %v, want 30, true", got, ok)
 	}
 
 	err.SetRetryAfter(-9)
-	if err.RetryAfter == nil || *err.RetryAfter != 0 {
-		t.Errorf("RetryAfter = %v, want 0 - the setter clamps negative hints at the source", err.RetryAfter)
+	if got, ok := err.RetryAfter(); !ok || got != 0 {
+		t.Errorf("RetryAfter() = %d, %v, want 0, true - the setter clamps negative hints at the source", got, ok)
+	}
+}
+
+// TestContextDerivation pins the v1 Context() model: derived on demand
+// from each type's canonical identity fields (never snapshotted), so it
+// can never disagree with what the response writers and log fields
+// report. Includes the normalizations v1 introduced against the old
+// construction-time snapshots, documented in docs/v1-design-pass.md's
+// stage-3 amendment.
+func TestContextDerivation(t *testing.T) {
+	withHint := NewExternalAPIError("yahoo", "call failed", 503, "https://api.example.com")
+	withHint.SetRetryAfter(30)
+
+	cases := []struct {
+		name string
+		err  interface{ Context() map[string]any }
+		want map[string]any
+	}{
+		{"BaseError via New", New(ErrCodeQuotaExceeded, "quota"), nil},
+		{"BaseError via Wrap", Wrap(errors.New("cause"), ErrCodeQuotaExceeded, "quota"), nil},
+		{"ValidationError", NewValidationError("bad", "email", "x@"),
+			map[string]any{"field": "email", "value": "x@"}},
+		{"WrapValidationError includes nil value", WrapValidationError(errors.New("cause"), "bad", "email"),
+			map[string]any{"field": "email", "value": nil}},
+		{"NewDatabaseError omits empty query", NewDatabaseError("insert", "dup"),
+			map[string]any{"operation": "insert"}},
+		{"WrapDatabaseError includes query", WrapDatabaseError(errors.New("cause"), "query", "SELECT 1"),
+			map[string]any{"operation": "query", "query": "SELECT 1"}},
+		{"ExternalAPIError without hint", NewExternalAPIError("yahoo", "call failed", 503, "https://api.example.com"),
+			map[string]any{"service": "yahoo", "status_code": 503, "url": "https://api.example.com"}},
+		{"ExternalAPIError with hint includes retry_after", withHint,
+			map[string]any{"service": "yahoo", "status_code": 503, "url": "https://api.example.com", "retry_after": 30}},
+		{"AuthenticationError", NewAuthenticationError("token_expired", "expired"),
+			map[string]any{"reason": "token_expired"}},
+		{"NotFoundError", NewNotFoundError("league", "12345"),
+			map[string]any{"resource_type": "league", "resource_id": "12345"}},
+		{"ConflictError", NewConflictError("user", "email", "dup"),
+			map[string]any{"resource_type": "user", "conflict_key": "email"}},
+		{"RateLimitError", NewRateLimitError("api", 100, 30),
+			map[string]any{"service": "api", "limit": 100, "retry_after": 30}},
+		{"InternalError", NewInternalError("billing", "boom"),
+			map[string]any{"component": "billing"}},
 	}
 
-	// Each call stores a fresh pointer: a caller holding the previous
-	// pointer must not observe later hints through it.
-	err.SetRetryAfter(10)
-	first := err.RetryAfter
-	err.SetRetryAfter(20)
-	if *first != 10 {
-		t.Errorf("earlier pointer now reads %d, want 10 - SetRetryAfter must not mutate through old pointers", *first)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.err.Context()
+			if len(got) != len(tc.want) {
+				t.Fatalf("Context() = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("Context()[%q] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
+	}
+
+	t.Run("each call builds a fresh map", func(t *testing.T) {
+		err := NewNotFoundError("league", "12345")
+		first := err.Context()
+		first["resource_id"] = "tampered"
+		delete(first, "resource_type")
+		second := err.Context()
+		if second["resource_id"] != "12345" || second["resource_type"] != "league" {
+			t.Errorf("second Context() = %v - mutating an earlier result must not reach the error", second)
+		}
+	})
+}
+
+// TestIdentityAccessors exercises every v1 accessor against its
+// construction inputs - the read side of the compiler-enforced
+// immutable-identity contract.
+func TestIdentityAccessors(t *testing.T) {
+	v := NewValidationError("bad", "email", "x@")
+	if v.Field() != "email" || v.Value() != "x@" {
+		t.Errorf("ValidationError accessors = %q/%v, want email/x@", v.Field(), v.Value())
+	}
+	d := WrapDatabaseError(errors.New("x"), "insert", "INSERT ...")
+	if d.Operation() != "insert" || d.Query() != "INSERT ..." {
+		t.Errorf("DatabaseError accessors = %q/%q", d.Operation(), d.Query())
+	}
+	e := NewExternalAPIError("yahoo", "failed", 503, "https://u")
+	if e.Service() != "yahoo" || e.StatusCode() != 503 || e.URL() != "https://u" {
+		t.Errorf("ExternalAPIError accessors = %q/%d/%q", e.Service(), e.StatusCode(), e.URL())
+	}
+	a := NewAuthenticationError("token_expired", "expired")
+	if a.Reason() != "token_expired" {
+		t.Errorf("Reason() = %q", a.Reason())
+	}
+	n := NewNotFoundError("league", "12345")
+	if n.ResourceType() != "league" || n.ResourceID() != "12345" {
+		t.Errorf("NotFoundError accessors = %q/%q", n.ResourceType(), n.ResourceID())
+	}
+	c := NewConflictError("user", "email", "dup")
+	if c.ResourceType() != "user" || c.ConflictKey() != "email" {
+		t.Errorf("ConflictError accessors = %q/%q", c.ResourceType(), c.ConflictKey())
+	}
+	r := NewRateLimitError("api", 100, 30)
+	if r.Service() != "api" || r.Limit() != 100 || r.RetryAfter() != 30 {
+		t.Errorf("RateLimitError accessors = %q/%d/%d", r.Service(), r.Limit(), r.RetryAfter())
+	}
+	i := NewInternalError("billing", "boom")
+	if i.Component() != "billing" {
+		t.Errorf("Component() = %q", i.Component())
 	}
 }

@@ -113,9 +113,17 @@ import (
 
 var nfErr *svcerr.NotFoundError
 if errors.As(err, &nfErr) {
-	// ...
+	log.Printf("missing %s: %s", nfErr.ResourceType(), nfErr.ResourceID())
 }
 ```
+
+Identity is read through same-name methods (`nfErr.ResourceType()`,
+`vErr.Field()`, `rlErr.RetryAfter()`, ...) and is fixed at construction -
+every projection of an error (response details, headers, log fields,
+`Context()`) derives from that one canonical state, so they can never
+disagree. Presentation (public message, details, problem members,
+authentication challenges) is configured through the `Set*` methods
+before the error is returned.
 
 Recover panics in HTTP handlers and turn them into a proper error response:
 

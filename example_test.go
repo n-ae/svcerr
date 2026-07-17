@@ -72,7 +72,7 @@ func ExampleNewNotFoundError() {
 
 	var nfErr *svcerr.NotFoundError
 	if errors.As(err, &nfErr) {
-		fmt.Println(nfErr.ResourceType, nfErr.ResourceID)
+		fmt.Println(nfErr.ResourceType(), nfErr.ResourceID())
 	}
 	fmt.Println(svcerr.GetErrorCode(err), svcerr.HTTPStatusCode(svcerr.GetErrorCode(err)))
 	// Output:

@@ -18,5 +18,5 @@ type Logger interface {
 	// path logs a message with no associated error). fields carries
 	// structured context (error_code, http_status, stack_trace, and
 	// error-type-specific keys like "field" or "resource_id").
-	Log(level Level, err error, fields map[string]interface{}, msg string)
+	Log(level Level, err error, fields map[string]any, msg string)
 }

@@ -189,11 +189,11 @@ type recordingLogger struct {
 type loggedCall struct {
 	level  Level
 	err    error
-	fields map[string]interface{}
+	fields map[string]any
 	msg    string
 }
 
-func (l *recordingLogger) Log(level Level, err error, fields map[string]interface{}, msg string) {
+func (l *recordingLogger) Log(level Level, err error, fields map[string]any, msg string) {
 	l.calls = append(l.calls, loggedCall{level: level, err: err, fields: fields, msg: msg})
 }
 
@@ -288,9 +288,8 @@ func TestWriteHTTPError(t *testing.T) {
 	t.Run("external API error includes service details", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}
-		retryAfter := 30
 		err := NewExternalAPIError("yahoo", "yahoo API call failed", 503, "https://fantasysports.yahooapis.com/...")
-		err.RetryAfter = &retryAfter
+		err.SetRetryAfter(30)
 
 		WriteHTTPError(w, err, logger)
 
@@ -624,7 +623,7 @@ func TestWriteHTTPProblem(t *testing.T) {
 			t.Errorf("Content-Type = %q, want application/problem+json", ct)
 		}
 
-		var resp map[string]interface{}
+		var resp map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
 		}
@@ -677,7 +676,7 @@ func TestWriteHTTPProblem(t *testing.T) {
 
 		WriteHTTPProblem(w, err, logger)
 
-		var resp map[string]interface{}
+		var resp map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v", decErr)
 		}
@@ -703,7 +702,7 @@ func TestWriteHTTPProblem(t *testing.T) {
 
 		WriteHTTPProblem(w, err, logger)
 
-		var resp map[string]interface{}
+		var resp map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v", decErr)
 		}
@@ -1187,7 +1186,7 @@ func TestWriteProblemFallsBackOnUnencodableDetail(t *testing.T) {
 		t.Errorf("status = %d, want %d", status, http.StatusInternalServerError)
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
 		t.Fatalf("body is not valid JSON: %v (body: %q)", decErr, w.Body.String())
 	}
@@ -1312,7 +1311,7 @@ func TestSafeLogContainsAPanickingLogger(t *testing.T) {
 	// RecoveryMiddleware, that panic would propagate out of svcerr's
 	// already-executing recover(), uncaught, replacing the original
 	// panic's diagnostics with a generic trace pointing at the logger.
-	panicking := loggerFunc(func(Level, error, map[string]interface{}, string) {
+	panicking := loggerFunc(func(Level, error, map[string]any, string) {
 		panic("logger is broken")
 	})
 
@@ -1335,7 +1334,7 @@ func TestRecoveryMiddlewareSurvivesAPanickingLogger(t *testing.T) {
 	// End-to-end: a Logger that panics must not prevent RecoveryMiddleware
 	// from still turning the handler's original panic into a proper error
 	// response - the whole point of the middleware.
-	panicking := loggerFunc(func(Level, error, map[string]interface{}, string) {
+	panicking := loggerFunc(func(Level, error, map[string]any, string) {
 		panic("logger is broken")
 	})
 	handler := RecoveryMiddleware(panicking)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2565,19 +2564,19 @@ func TestRecoveryMiddleware(t *testing.T) {
 	})
 }
 
-// TestRetryAfterMutatedAfterConstructionIsClampedAtEmission is the
-// regression test for assessment v0.6.4/M1: RateLimitError.RetryAfter is
-// an exported writable field, so the constructors' clampRetryAfter is only
-// input cleanup - a negative value assigned afterward used to reach the
-// wire verbatim (Retry-After: -9), violating RFC 9110 §10.2.3's
-// non-negative delay-seconds. Every emission path must re-clamp: the
-// header on all three renderings, the JSON/problem details, and the log
-// field, so they all agree.
-func TestRetryAfterMutatedAfterConstructionIsClampedAtEmission(t *testing.T) {
+// TestRetryAfterInvariantHoldsAcrossAllEmissionSurfaces is the successor
+// to assessment v0.6.4/M1's mutation regression test. Before v1 the
+// exported RetryAfter field could be assigned a negative value after
+// construction, so every emission path re-clamped defensively; since v1
+// the field is unexported and the constructors are the only entry point,
+// making non-negativity a stored invariant. This retargeted test feeds
+// the constructor the hostile value instead and asserts every emission
+// surface - the header on all three renderings, the JSON/problem
+// details, and the log field - agrees on the clamped result, which now
+// proves the invariant rather than the removed per-site compensations.
+func TestRetryAfterInvariantHoldsAcrossAllEmissionSurfaces(t *testing.T) {
 	newMutated := func() *RateLimitError {
-		err := NewRateLimitError("api", 100, 30)
-		err.RetryAfter = -9
-		return err
+		return NewRateLimitError("api", 100, -9)
 	}
 
 	t.Run("JSON header and details", func(t *testing.T) {
@@ -2610,7 +2609,7 @@ func TestRetryAfterMutatedAfterConstructionIsClampedAtEmission(t *testing.T) {
 		if got := w.Header().Get("Retry-After"); got != "0" {
 			t.Errorf("Retry-After = %q, want %q", got, "0")
 		}
-		var resp map[string]interface{}
+		var resp map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
 		}
@@ -2633,9 +2632,8 @@ func TestExternalAPIErrorNegativeRetryAfterIsClampedInDetails(t *testing.T) {
 	// ExternalAPIError.RetryAfter is documented for direct
 	// post-construction assignment, so no constructor ever vets it - the
 	// details projection is its only emission path and must clamp.
-	retryAfter := -5
 	err := NewExternalAPIError("yahoo", "yahoo API call failed", 503, "https://example.com")
-	err.RetryAfter = &retryAfter
+	err.SetRetryAfter(-5)
 
 	w := httptest.NewRecorder()
 	WriteJSON(w, err)
@@ -2661,58 +2659,57 @@ func TestExternalAPIErrorNegativeRetryAfterIsClampedInDetails(t *testing.T) {
 // no errorLogFields case at all, so e.g. a 500 logged its stack trace but
 // not which component failed.
 func TestErrorLogFieldsCompleteness(t *testing.T) {
-	retryAfter := 30
 	externalErr := NewExternalAPIError("yahoo", "call failed", 503, "https://internal.example.com/upstream")
-	externalErr.RetryAfter = &retryAfter
+	externalErr.SetRetryAfter(30)
 
 	cases := []struct {
 		name       string
 		err        error
-		wantFields map[string]interface{}
+		wantFields map[string]any
 		wantAbsent []string
 	}{
 		{
 			name:       "ValidationError",
 			err:        NewValidationError("bad email", "email", "secret-input"),
-			wantFields: map[string]interface{}{"field": "email"},
+			wantFields: map[string]any{"field": "email"},
 			wantAbsent: []string{"value"}, // caller input; may be a password or token
 		},
 		{
 			name:       "DatabaseError",
 			err:        WrapDatabaseError(stdlibError("dup key"), "insert", "INSERT INTO users ..."),
-			wantFields: map[string]interface{}{"db_operation": "insert"},
+			wantFields: map[string]any{"db_operation": "insert"},
 			wantAbsent: []string{"query"}, // raw SQL text
 		},
 		{
 			name:       "ExternalAPIError",
 			err:        externalErr,
-			wantFields: map[string]interface{}{"service": "yahoo", "service_status": 503},
+			wantFields: map[string]any{"service": "yahoo", "service_status": 503},
 			wantAbsent: []string{"url"}, // internal topology
 		},
 		{
 			name:       "AuthenticationError",
 			err:        NewAuthenticationError("token_expired", "session expired"),
-			wantFields: map[string]interface{}{"auth_reason": "token_expired"},
+			wantFields: map[string]any{"auth_reason": "token_expired"},
 		},
 		{
 			name:       "NotFoundError",
 			err:        NewNotFoundError("league", "12345"),
-			wantFields: map[string]interface{}{"resource_type": "league", "resource_id": "12345"},
+			wantFields: map[string]any{"resource_type": "league", "resource_id": "12345"},
 		},
 		{
 			name:       "ConflictError",
 			err:        NewConflictError("user", "email", "user already exists"),
-			wantFields: map[string]interface{}{"resource_type": "user", "conflict_key": "email"},
+			wantFields: map[string]any{"resource_type": "user", "conflict_key": "email"},
 		},
 		{
 			name:       "RateLimitError",
 			err:        NewRateLimitError("api", 100, 30),
-			wantFields: map[string]interface{}{"service": "api", "limit": 100, "retry_after": 30},
+			wantFields: map[string]any{"service": "api", "limit": 100, "retry_after": 30},
 		},
 		{
 			name:       "InternalError",
 			err:        NewInternalError("billing", "charge failed"),
-			wantFields: map[string]interface{}{"component": "billing"},
+			wantFields: map[string]any{"component": "billing"},
 		},
 	}
 
@@ -2754,7 +2751,7 @@ func TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions(t *testing.T)
 			Status: 404,
 			Detail: "widget not found",
 			Code:   ErrCodeNotFound,
-			Extensions: map[string]interface{}{
+			Extensions: map[string]any{
 				"type":     "https://evil.example/override",
 				"title":    "Overridden",
 				"status":   999,
@@ -2769,7 +2766,7 @@ func TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions(t *testing.T)
 		if marshalErr != nil {
 			t.Fatalf("marshal failed: %v", marshalErr)
 		}
-		var out map[string]interface{}
+		var out map[string]any
 		if decErr := json.Unmarshal(body, &out); decErr != nil {
 			t.Fatalf("round-trip failed: %v", decErr)
 		}
@@ -2805,7 +2802,7 @@ func TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions(t *testing.T)
 		w := httptest.NewRecorder()
 		WriteProblem(w, err)
 
-		var out map[string]interface{}
+		var out map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &out); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v (body: %s)", decErr, w.Body.String())
 		}
@@ -2827,7 +2824,7 @@ func TestProblemDetailsReservedMembersCannotBeOccupiedByExtensions(t *testing.T)
 		w := httptest.NewRecorder()
 		WriteProblem(w, err)
 
-		var out map[string]interface{}
+		var out map[string]any
 		if decErr := json.Unmarshal(w.Body.Bytes(), &out); decErr != nil {
 			t.Fatalf("body is not valid JSON: %v", decErr)
 		}
@@ -2938,9 +2935,8 @@ func TestExternalAPIErrorRetryAfterHeader(t *testing.T) {
 
 	for name, write := range writers {
 		t.Run(name+"/set hint becomes the header", func(t *testing.T) {
-			retryAfter := 30
 			err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
-			err.RetryAfter = &retryAfter
+			err.SetRetryAfter(30)
 
 			w := httptest.NewRecorder()
 			write(w, err, nil)
@@ -2963,9 +2959,8 @@ func TestExternalAPIErrorRetryAfterHeader(t *testing.T) {
 		})
 
 		t.Run(name+"/negative hint is clamped at emission", func(t *testing.T) {
-			retryAfter := -5
 			err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
-			err.RetryAfter = &retryAfter
+			err.SetRetryAfter(-5)
 
 			w := httptest.NewRecorder()
 			write(w, err, nil)
@@ -2977,9 +2972,8 @@ func TestExternalAPIErrorRetryAfterHeader(t *testing.T) {
 	}
 
 	t.Run("a wrapper's code can't inherit a wrapped ExternalAPIError's header", func(t *testing.T) {
-		retryAfter := 30
 		inner := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
-		inner.RetryAfter = &retryAfter
+		inner.SetRetryAfter(30)
 		outer := WrapInternalError(inner, "gateway", "request failed")
 
 		w := httptest.NewRecorder()

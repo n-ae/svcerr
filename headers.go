@@ -158,22 +158,19 @@ func prepareErrorHeaders(h http.Header, contentType string, policy HeaderPolicy)
 // on the marshal-failure fallback by the JSON/problem+json callers, since
 // that response no longer represents err's own classification.
 //
-// RetryAfter is re-clamped here, at the wire boundary, because both
-// fields are exported and writable until v1: RateLimitError's
-// constructor clamp and ExternalAPIError.SetRetryAfter's clamp are only
-// input cleanup that direct field assignment can still bypass - a
-// negative value would otherwise become an invalid Retry-After (RFC 9110
-// §10.2.3 requires a non-negative delay-seconds). extractErrorDetails
-// and errorLogFields clamp the same way, so the header, the JSON
-// details, and the log field always agree. Once v1 unexports the fields,
-// these emission clamps become removable (docs/v1-design-pass.md).
+// The stored retry values are trusted here without re-clamping: since
+// v1 the fields are unexported and every entry point (the RateLimitError
+// constructors, ExternalAPIError.SetRetryAfter) clamps to the
+// non-negative delay-seconds RFC 9110 §10.2.3 requires, so validity is a
+// real invariant of the stored value rather than something each emission
+// site must re-establish.
 func retryAfterHeader(h http.Header, node coderError) {
 	switch v := node.(type) {
 	case *RateLimitError:
-		h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(v.RetryAfter)))
+		h.Set("Retry-After", fmt.Sprintf("%d", v.retryAfter))
 	case *ExternalAPIError:
-		if v.RetryAfter != nil {
-			h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(*v.RetryAfter)))
+		if v.retryAfter != nil {
+			h.Set("Retry-After", fmt.Sprintf("%d", *v.retryAfter))
 		}
 	}
 }

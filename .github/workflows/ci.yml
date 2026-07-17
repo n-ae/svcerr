@@ -24,8 +24,8 @@ jobs:
       #
       # The go axis enforces each module's go.mod floor continuously
       # instead of leaving it aspirational: "floor" installs exactly the
-      # version the go directive declares (root: 1.20, chosen by our own
-      # newest stdlib usage; zerologadapter: dictated upward by zerolog's
+      # version the go directive declares (root: 1.21, raised at v1.0.0 per
+      # docs/v1-design-pass.md; zerologadapter: dictated upward by zerolog's
       # dependency chain, currently golang.org/x/sys), "stable" is the
       # current Go release.
       matrix:

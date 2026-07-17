@@ -43,13 +43,13 @@ type contractLogger struct {
 type contractLogEntry struct {
 	level  svcerr.Level
 	err    error
-	fields map[string]interface{}
+	fields map[string]any
 	msg    string
 }
 
 var _ svcerr.Logger = (*contractLogger)(nil)
 
-func (l *contractLogger) Log(level svcerr.Level, err error, fields map[string]interface{}, msg string) {
+func (l *contractLogger) Log(level svcerr.Level, err error, fields map[string]any, msg string) {
 	l.entries = append(l.entries, contractLogEntry{level: level, err: err, fields: fields, msg: msg})
 }
 
@@ -70,36 +70,36 @@ func TestContractConstructorsAndStdlibErrors(t *testing.T) {
 		{"NewValidationError", svcerr.NewValidationError("bad email", "email", "x@"), svcerr.ErrCodeInvalidInput, false,
 			func(err error) bool {
 				var e *svcerr.ValidationError
-				return errors.As(err, &e) && e.Field == "email"
+				return errors.As(err, &e) && e.Field() == "email"
 			}},
 		{"WrapValidationError", svcerr.WrapValidationError(cause, "bad email", "email"), svcerr.ErrCodeInvalidInput, true,
 			func(err error) bool {
 				var e *svcerr.ValidationError
-				return errors.As(err, &e) && e.Field == "email"
+				return errors.As(err, &e) && e.Field() == "email"
 			}},
 		{"NewDatabaseError", svcerr.NewDatabaseError("query", "select failed"), svcerr.ErrCodeDatabaseQuery, false,
 			func(err error) bool {
 				var e *svcerr.DatabaseError
-				return errors.As(err, &e) && e.Operation == "query"
+				return errors.As(err, &e) && e.Operation() == "query"
 			}},
 		{"NewDatabaseError transaction", svcerr.NewDatabaseError("transaction", "commit failed"), svcerr.ErrCodeDatabaseTransaction, false,
 			func(err error) bool { var e *svcerr.DatabaseError; return errors.As(err, &e) }},
 		{"WrapDatabaseError", svcerr.WrapDatabaseError(cause, "insert", "INSERT INTO t ..."), svcerr.ErrCodeDatabaseQuery, true,
 			func(err error) bool {
 				var e *svcerr.DatabaseError
-				return errors.As(err, &e) && e.Query == "INSERT INTO t ..."
+				return errors.As(err, &e) && e.Query() == "INSERT INTO t ..."
 			}},
 		{"NewExternalAPIError", svcerr.NewExternalAPIError("yahoo", "upstream 503", 503, "https://api.example.com"), svcerr.ErrCodeExternalAPI, false,
 			func(err error) bool {
 				var e *svcerr.ExternalAPIError
-				return errors.As(err, &e) && e.Service == "yahoo" && e.StatusCode == 503
+				return errors.As(err, &e) && e.Service() == "yahoo" && e.StatusCode() == 503
 			}},
 		{"WrapExternalAPIError", svcerr.WrapExternalAPIError(cause, "yahoo", "https://api.example.com", 502), svcerr.ErrCodeExternalAPI, true,
 			func(err error) bool { var e *svcerr.ExternalAPIError; return errors.As(err, &e) }},
 		{"NewAuthenticationError token_expired", svcerr.NewAuthenticationError("token_expired", "session expired"), svcerr.ErrCodeTokenExpired, false,
 			func(err error) bool {
 				var e *svcerr.AuthenticationError
-				return errors.As(err, &e) && e.Reason == "token_expired"
+				return errors.As(err, &e) && e.Reason() == "token_expired"
 			}},
 		{"NewAuthenticationError default reason", svcerr.NewAuthenticationError("no_credentials", "log in first"), svcerr.ErrCodeUnauthorized, false,
 			func(err error) bool { var e *svcerr.AuthenticationError; return errors.As(err, &e) }},
@@ -108,28 +108,28 @@ func TestContractConstructorsAndStdlibErrors(t *testing.T) {
 		{"NewNotFoundError", svcerr.NewNotFoundError("league", "12345"), svcerr.ErrCodeNotFound, false,
 			func(err error) bool {
 				var e *svcerr.NotFoundError
-				return errors.As(err, &e) && e.ResourceType == "league" && e.ResourceID == "12345"
+				return errors.As(err, &e) && e.ResourceType() == "league" && e.ResourceID() == "12345"
 			}},
 		{"WrapNotFoundError", svcerr.WrapNotFoundError(cause, "league", "12345"), svcerr.ErrCodeNotFound, true,
 			func(err error) bool { var e *svcerr.NotFoundError; return errors.As(err, &e) }},
 		{"NewConflictError", svcerr.NewConflictError("user", "email", "already registered"), svcerr.ErrCodeAlreadyExists, false,
 			func(err error) bool {
 				var e *svcerr.ConflictError
-				return errors.As(err, &e) && e.ConflictKey == "email"
+				return errors.As(err, &e) && e.ConflictKey() == "email"
 			}},
 		{"WrapConflictError", svcerr.WrapConflictError(cause, "user", "email", "already registered"), svcerr.ErrCodeAlreadyExists, true,
 			func(err error) bool { var e *svcerr.ConflictError; return errors.As(err, &e) }},
 		{"NewRateLimitError", svcerr.NewRateLimitError("api", 100, 30), svcerr.ErrCodeRateLimitExceeded, false,
 			func(err error) bool {
 				var e *svcerr.RateLimitError
-				return errors.As(err, &e) && e.Limit == 100 && e.RetryAfter == 30
+				return errors.As(err, &e) && e.Limit() == 100 && e.RetryAfter() == 30
 			}},
 		{"WrapRateLimitError", svcerr.WrapRateLimitError(cause, "api", 100, 30), svcerr.ErrCodeRateLimitExceeded, true,
 			func(err error) bool { var e *svcerr.RateLimitError; return errors.As(err, &e) }},
 		{"NewInternalError", svcerr.NewInternalError("billing", "charge failed"), svcerr.ErrCodeInternal, false,
 			func(err error) bool {
 				var e *svcerr.InternalError
-				return errors.As(err, &e) && e.Component == "billing"
+				return errors.As(err, &e) && e.Component() == "billing"
 			}},
 		{"WrapInternalError", svcerr.WrapInternalError(cause, "billing", "charge failed"), svcerr.ErrCodeInternal, true,
 			func(err error) bool { var e *svcerr.InternalError; return errors.As(err, &e) }},
@@ -235,11 +235,11 @@ func TestContractProblemResponse(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
 		t.Errorf("Content-Type = %q, want application/problem+json", ct)
 	}
-	var out map[string]interface{}
+	var out map[string]any
 	if jsonErr := json.Unmarshal(rec.Body.Bytes(), &out); jsonErr != nil {
 		t.Fatalf("body is not valid JSON: %v", jsonErr)
 	}
-	want := map[string]interface{}{
+	want := map[string]any{
 		"type":     "https://example.com/problems/resource-not-found",
 		"title":    "League not found",
 		"status":   float64(404),
@@ -606,7 +606,7 @@ func TestContractRecoveryMiddleware(t *testing.T) {
 		}))
 
 		rec := httptest.NewRecorder()
-		var recovered interface{}
+		var recovered any
 		func() {
 			defer func() { recovered = recover() }()
 			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))

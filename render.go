@@ -14,9 +14,9 @@ type HTTPErrorResponse struct {
 
 // ErrorDetail contains detailed error information for API responses
 type ErrorDetail struct {
-	Code    ErrorCode              `json:"code"`
-	Message string                 `json:"message"`
-	Details map[string]interface{} `json:"details,omitempty"`
+	Code    ErrorCode      `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // WriteResult reports what WriteJSONResult/WriteHTMLResult/
@@ -59,7 +59,13 @@ type WriteResult struct {
 	BytesWritten int
 }
 
-// WriteHTTPError writes a standardized error response to the HTTP response writer
+// WriteHTTPError writes a standardized error response to the HTTP
+// response writer, logging through logger.
+//
+// Prefer a Renderer, whose JSON method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 	statusCode, bytesWritten, renderErr, writeErr := writeJSONErrorBody(w, err, defaultRenderSettings())
 	logError(logger, err, statusCode, renderErr, writeErr, bytesWritten)
@@ -80,6 +86,11 @@ func WriteJSON(w http.ResponseWriter, err error) int {
 // write failure - e.g. so a caller can avoid claiming success to its own
 // caller, or report the failure through its own error-tracking system
 // instead of this package's Logger contract.
+//
+// Prefer a Renderer, whose JSON method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
 	statusCode, bytesWritten, renderErr, writeErr := writeJSONErrorBody(w, err, defaultRenderSettings())
 	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr, BytesWritten: bytesWritten}
@@ -210,7 +221,13 @@ func fallbackErrorBody(code ErrorCode) []byte {
 	return body
 }
 
-// WriteHTTPErrorHTML writes an HTML error response (for non-API endpoints)
+// WriteHTTPErrorHTML writes an HTML error response (for non-API
+// endpoints), logging through logger.
+//
+// Prefer a Renderer, whose HTML method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
 	statusCode, bytesWritten, writeErr := writeHTMLErrorBody(w, err, defaultRenderSettings())
 	logError(logger, err, statusCode, nil, writeErr, bytesWritten)
@@ -225,6 +242,11 @@ func WriteHTML(w http.ResponseWriter, err error) int {
 
 // WriteHTMLResult mirrors WriteJSONResult for the HTML rendering.
 // RenderErr is always nil - see WriteResult.
+//
+// Prefer a Renderer, whose HTML method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteHTMLResult(w http.ResponseWriter, err error) WriteResult {
 	statusCode, bytesWritten, writeErr := writeHTMLErrorBody(w, err, defaultRenderSettings())
 	return WriteResult{Status: statusCode, WriteErr: writeErr, BytesWritten: bytesWritten}
@@ -255,13 +277,13 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error, s renderSettings) (sta
 // says extension members live at the top level alongside the registered
 // ones, which is what MarshalJSON does instead of nesting them.
 type ProblemDetails struct {
-	Type       string                 // a URI reference identifying the problem type; "about:blank" when none is registered
-	Title      string                 // a short, occurrence-invariant summary of the problem type
-	Status     int                    // the HTTP status code for this occurrence
-	Detail     string                 // a human-readable explanation specific to this occurrence
-	Instance   string                 // a URI reference identifying this specific occurrence, if known
-	Code       ErrorCode              // this package's own error code, as an extension member
-	Extensions map[string]interface{} // additional extension members (e.g. resource_id, field)
+	Type       string         // a URI reference identifying the problem type; "about:blank" when none is registered
+	Title      string         // a short, occurrence-invariant summary of the problem type
+	Status     int            // the HTTP status code for this occurrence
+	Detail     string         // a human-readable explanation specific to this occurrence
+	Instance   string         // a URI reference identifying this specific occurrence, if known
+	Code       ErrorCode      // this package's own error code, as an extension member
+	Extensions map[string]any // additional extension members (e.g. resource_id, field)
 }
 
 // reservedProblemMembers are the member names MarshalJSON owns: the RFC
@@ -286,7 +308,7 @@ var reservedProblemMembers = map[string]struct{}{
 // Extension entries named after a registered member (or "code") are
 // dropped - see reservedProblemMembers.
 func (p ProblemDetails) MarshalJSON() ([]byte, error) {
-	out := make(map[string]interface{}, len(p.Extensions)+5)
+	out := make(map[string]any, len(p.Extensions)+5)
 	for k, v := range p.Extensions {
 		if _, reserved := reservedProblemMembers[k]; reserved {
 			continue
@@ -312,6 +334,11 @@ func (p ProblemDetails) MarshalJSON() ([]byte, error) {
 // problem-details format. Status mapping, message safety (Detail never
 // includes a wrapped cause's text without an explicit SetPublicMessage),
 // and logging behave identically to WriteHTTPError.
+//
+// Prefer a Renderer, whose Problem method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
 	statusCode, bytesWritten, renderErr, writeErr := writeProblemJSONBody(w, err, defaultRenderSettings())
 	logError(logger, err, statusCode, renderErr, writeErr, bytesWritten)
@@ -325,6 +352,11 @@ func WriteProblem(w http.ResponseWriter, err error) int {
 }
 
 // WriteProblemResult mirrors WriteJSONResult for the RFC 9457 rendering.
+//
+// Prefer a Renderer, whose Problem method both logs (via the config
+// Logger) and returns the WriteResult in one call - this function
+// remains fully supported, but new code shouldn't need the split
+// logging/result variants it exists for.
 func WriteProblemResult(w http.ResponseWriter, err error) WriteResult {
 	statusCode, bytesWritten, renderErr, writeErr := writeProblemJSONBody(w, err, defaultRenderSettings())
 	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr, BytesWritten: bytesWritten}
@@ -520,42 +552,41 @@ func defaultMessageForCode(code ErrorCode) string {
 // error in err's chain - the same node whose code selects the HTTP status
 // and message (see outermostCoded) - so a wrapper's code is never paired
 // with a wrapped error's details.
-func extractErrorDetails(err error) map[string]interface{} {
-	details := make(map[string]interface{})
+func extractErrorDetails(err error) map[string]any {
+	details := make(map[string]any)
 	node := outermostCoded(err)
 
 	switch v := node.(type) {
 	case *ValidationError:
-		if v.Field != "" {
-			details["field"] = v.Field
+		if v.field != "" {
+			details["field"] = v.field
 		}
-		// v.Value is deliberately not included here - it's whatever the
+		// v.value is deliberately not included here - it's whatever the
 		// caller passed in (a password, a token, an oversized payload),
 		// and this package has no way to know it's safe to publish.
 	case *DatabaseError:
-		if v.Operation != "" {
-			details["operation"] = v.Operation
+		if v.operation != "" {
+			details["operation"] = v.operation
 		}
 	case *ExternalAPIError:
-		details["service"] = v.Service
-		if v.StatusCode > 0 {
-			details["status_code"] = v.StatusCode
+		details["service"] = v.service
+		if v.statusCode > 0 {
+			details["status_code"] = v.statusCode
 		}
-		if v.RetryAfter != nil {
-			// Clamped like RateLimitError's: SetRetryAfter clamps on the way
-			// in, but the field stays directly assignable until v1. Also
-			// emitted as the Retry-After header - see retryAfterHeader.
-			details["retry_after"] = clampRetryAfter(*v.RetryAfter)
+		if v.retryAfter != nil {
+			// Also emitted as the Retry-After header - see retryAfterHeader.
+			// Already clamped by SetRetryAfter, the only way to set it.
+			details["retry_after"] = *v.retryAfter
 		}
 	case *NotFoundError:
-		details["resource_type"] = v.ResourceType
-		if v.ResourceID != "" {
-			details["resource_id"] = v.ResourceID
+		details["resource_type"] = v.resourceType
+		if v.resourceID != "" {
+			details["resource_id"] = v.resourceID
 		}
 	case *RateLimitError:
-		details["limit"] = v.Limit
-		// Re-clamped at emission - see retryAfterHeader.
-		details["retry_after"] = clampRetryAfter(v.RetryAfter)
+		details["limit"] = v.limit
+		// Already clamped at construction, the only way to set it.
+		details["retry_after"] = v.retryAfter
 	}
 
 	// SetPublicDetail/RemovePublicDetail overrides, from the same
