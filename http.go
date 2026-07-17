@@ -3,7 +3,6 @@ package svcerr
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"net"
@@ -670,26 +669,29 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 		}
 	}
 
-	// Add type-specific context
-	var ve *ValidationError
-	var de *DatabaseError
-	var ee *ExternalAPIError
-	var ae *AuthenticationError
-	var ne *NotFoundError
-
-	switch {
-	case errors.As(err, &ve):
-		fields["field"] = ve.Field
-	case errors.As(err, &de):
-		fields["db_operation"] = de.Operation
-	case errors.As(err, &ee):
-		fields["service"] = ee.Service
-		fields["service_status"] = ee.StatusCode
-	case errors.As(err, &ae):
-		fields["auth_reason"] = ae.Reason
-	case errors.As(err, &ne):
-		fields["resource_type"] = ne.ResourceType
-		fields["resource_id"] = ne.ResourceID
+	// Add type-specific context from the same outermost coded node code
+	// itself came from (via GetErrorCode/outermostCoded above) - not an
+	// independent errors.As search across the whole chain, which could
+	// find and attribute fields from a different (inner) node than the one
+	// that produced code/statusCode. extractErrorDetails already follows
+	// this rule for the client-facing response body; this mirrors it for
+	// logging, for the same reason its own doc comment gives: an outer
+	// wrapper's code (e.g. ErrCodeNotFound from WrapNotFoundError) must
+	// not end up paired with a wrapped error's details (e.g. a
+	// DatabaseError's operation).
+	switch v := outermostCoded(err).(type) {
+	case *ValidationError:
+		fields["field"] = v.Field
+	case *DatabaseError:
+		fields["db_operation"] = v.Operation
+	case *ExternalAPIError:
+		fields["service"] = v.Service
+		fields["service_status"] = v.StatusCode
+	case *AuthenticationError:
+		fields["auth_reason"] = v.Reason
+	case *NotFoundError:
+		fields["resource_type"] = v.ResourceType
+		fields["resource_id"] = v.ResourceID
 	}
 
 	return level, fields
@@ -942,41 +944,110 @@ func (w *flushErrorHijackTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 	return commitOnHijack(w.trackingResponseWriter, w.hijacker)
 }
 
+// responseWriterUnwrapper is the interface http.ResponseController looks
+// for to continue past a wrapper that doesn't itself implement the
+// capability being searched for - documented by http.NewResponseController,
+// not a named type in net/http. discoverHijacker/discoverFlusher below walk
+// it the same way ResponseController does, so that capability discovery
+// here can't be bypassed by unwrapping past this package's own tracker the
+// way a direct type assertion could be (see discoverFlusher's doc comment).
+type responseWriterUnwrapper interface {
+	Unwrap() http.ResponseWriter
+}
+
+// discoverHijacker walks w's Unwrap chain - starting with w itself - the
+// same way http.ResponseController's Hijack() does: check the current
+// layer for http.Hijacker, and if it's not there, continue to
+// Unwrap()'s result and try again. Returns nil if no layer implements it.
+func discoverHijacker(w http.ResponseWriter) http.Hijacker {
+	for {
+		if hj, ok := w.(http.Hijacker); ok {
+			return hj
+		}
+		u, ok := w.(responseWriterUnwrapper)
+		if !ok {
+			return nil
+		}
+		w = u.Unwrap()
+	}
+}
+
+// discoverFlusher walks w's Unwrap chain the same way
+// http.ResponseController's Flush() does: at each layer, prefer
+// FlushError() error if present, else plain Flush() if present, else
+// continue to the next layer via Unwrap(). Crucially this checks both
+// interfaces at each layer before moving to the next, matching
+// ResponseController's actual per-layer priority - a naive "search every
+// layer for FlushError, then search every layer for Flusher" would give a
+// deeper FlushError priority over a shallower plain Flusher that
+// ResponseController would have stopped at first. Returns whichever it
+// finds first (at most one of the two return values is non-nil).
+func discoverFlusher(w http.ResponseWriter) (flushErrorer, http.Flusher) {
+	for {
+		if fe, ok := w.(flushErrorer); ok {
+			return fe, nil
+		}
+		if f, ok := w.(http.Flusher); ok {
+			return nil, f
+		}
+		u, ok := w.(responseWriterUnwrapper)
+		if !ok {
+			return nil, nil
+		}
+		w = u.Unwrap()
+	}
+}
+
 // newTrackingResponseWriter wraps w for RecoveryMiddleware's commit
 // tracking. It returns the http.ResponseWriter to pass to the handler -
-// implementing http.Hijacker if and only if w itself does, and
-// http.Flusher if and only if w can flush at all: plain Flush(),
-// FlushError() error, or both (FlushError is checked ahead of plain
-// Flusher, matching http.ResponseController's own priority - see
-// flushErrorer). One deliberate asymmetry follows: a writer implementing
-// only FlushError() gains a plain Flush() method it didn't have, because
-// the flush capability genuinely exists underneath and http.Flusher is
-// how handlers conventionally probe for it - an adapter over a real
-// capability, not a fabricated one (the FlushError method itself is also
-// preserved, so no error information is lost). Nothing else is
-// preserved: http.Pusher and io.ReaderFrom in particular are dropped by
-// the wrapper. The second return value is the *trackingResponseWriter
-// base, for reading wroteHeader/status afterward regardless of which
-// variant was returned (every variant embeds it by pointer, so its state
-// is shared either way).
+// implementing http.Hijacker if and only if discoverHijacker finds one
+// anywhere in w's Unwrap chain, and http.Flusher if and only if
+// discoverFlusher finds a flush capability anywhere in that same chain:
+// plain Flush(), FlushError() error, or both (FlushError is checked ahead
+// of plain Flusher at each layer, matching http.ResponseController's own
+// priority - see discoverFlusher). Searching the whole chain, not just w
+// itself, matters because trackingResponseWriter.Unwrap() below
+// unconditionally exposes the immediate w to http.ResponseController (for
+// deadline-related operations) - if capability discovery here only checked
+// w directly, a handler calling http.NewResponseController(wrapped).Flush()
+// could unwrap straight through this tracker to a real flusher one or more
+// layers down (behind an intermediate wrapper that implements only
+// Unwrap()), flushing - and thereby committing - the response without this
+// package ever finding out. Discovering the same capability
+// ResponseController would discover, and exposing it on the returned
+// wrapper itself, closes that gap: ResponseController checks the outermost
+// writer's own methods before ever calling Unwrap(), so it now matches this
+// wrapper immediately instead of reaching through it.
+//
+// One deliberate asymmetry follows from discoverFlusher: a writer whose
+// only flush capability is FlushError() gains a plain Flush() method it
+// didn't have, because the flush capability genuinely exists underneath and
+// http.Flusher is how handlers conventionally probe for it - an adapter
+// over a real capability, not a fabricated one (the FlushError method
+// itself is also preserved, so no error information is lost). Nothing else
+// is preserved: http.Pusher and io.ReaderFrom in particular are dropped by
+// the wrapper, at any depth. The second return value is the
+// *trackingResponseWriter base, for reading wroteHeader/status afterward
+// regardless of which variant was returned (every variant embeds it by
+// pointer, so its state is shared either way).
 func newTrackingResponseWriter(w http.ResponseWriter) (http.ResponseWriter, *trackingResponseWriter) {
 	base := &trackingResponseWriter{ResponseWriter: w}
-	hijacker, hijackable := w.(http.Hijacker)
+	hijacker := discoverHijacker(w)
+	flushErr, flusher := discoverFlusher(w)
 
-	if flushErr, ok := w.(flushErrorer); ok {
-		if hijackable {
+	if flushErr != nil {
+		if hijacker != nil {
 			return &flushErrorHijackTracker{trackingResponseWriter: base, flushErrorer: flushErr, hijacker: hijacker}, base
 		}
 		return &flushErrorTracker{trackingResponseWriter: base, flushErrorer: flushErr}, base
 	}
 
-	flusher, flushable := w.(http.Flusher)
 	switch {
-	case flushable && hijackable:
+	case flusher != nil && hijacker != nil:
 		return &flushHijackTracker{trackingResponseWriter: base, flusher: flusher, hijacker: hijacker}, base
-	case flushable:
+	case flusher != nil:
 		return &flushTracker{trackingResponseWriter: base, flusher: flusher}, base
-	case hijackable:
+	case hijacker != nil:
 		return &hijackTracker{trackingResponseWriter: base, hijacker: hijacker}, base
 	default:
 		return base, base

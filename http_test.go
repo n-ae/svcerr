@@ -375,6 +375,43 @@ func TestWriteHTTPError(t *testing.T) {
 		}
 	})
 
+	t.Run("logged fields describe the same node as the logged code, not a different node in the chain", func(t *testing.T) {
+		// Assessment 0008/L2: errorLogFields used to find type-specific
+		// fields via independent errors.As calls across the whole chain,
+		// so an outer NotFoundError's code/status could be logged
+		// alongside an inner DatabaseError's db_operation field instead of
+		// the outer node's own resource_type/resource_id - the same
+		// code/details mismatch outermostCoded's doc comment warns
+		// against, just one function over from where it was already fixed
+		// for the response body (extractErrorDetails, exercised above).
+		w := httptest.NewRecorder()
+		logger := &recordingLogger{}
+		inner := NewDatabaseError("query", "repository query failed")
+		outer := WrapNotFoundError(inner, "user", "123")
+
+		WriteHTTPError(w, outer, logger)
+
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		fields := logger.calls[0].fields
+		if fields["error_code"] != string(ErrCodeNotFound) {
+			t.Errorf("logged error_code = %v, want %v", fields["error_code"], ErrCodeNotFound)
+		}
+		if fields["resource_type"] != "user" {
+			t.Errorf("logged resource_type = %v, want %q (from the outer NotFoundError, the same node the code came from)", fields["resource_type"], "user")
+		}
+		if fields["resource_id"] != "123" {
+			t.Errorf("logged resource_id = %v, want %q (from the outer NotFoundError, the same node the code came from)", fields["resource_id"], "123")
+		}
+		if _, ok := fields["db_operation"]; ok {
+			t.Errorf("logged fields contain db_operation = %v, want it absent (that belongs to the inner DatabaseError, not the outer NotFoundError that produced error_code/http_status)", fields["db_operation"])
+		}
+	})
+
 	t.Run("SetPublicMessage overrides the response message", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		logger := &recordingLogger{}
@@ -1423,6 +1460,155 @@ func TestResponseControllerPreservesFlushError(t *testing.T) {
 			t.Error("Hijack() did not delegate to the underlying writer")
 		}
 	})
+}
+
+// unwrapOnly wraps a ResponseWriter with nothing but http.ResponseWriter
+// and Unwrap() http.ResponseWriter - no Flush, FlushError, or Hijack of its
+// own. This is the shape http.ResponseController documents as how a
+// middleware wrapper preserves controller operations through itself: a
+// legitimate, commonly-used pattern, not a contrived type. Used to verify
+// newTrackingResponseWriter's capability discovery follows the same Unwrap
+// chain http.ResponseController itself follows (assessment 0008/L1),
+// instead of only checking the immediate underlying writer.
+type unwrapOnly struct{ http.ResponseWriter }
+
+func (w *unwrapOnly) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func TestNewTrackingResponseWriterDiscoversCapabilitiesThroughUnwrapChain(t *testing.T) {
+	t.Run("Flusher behind an Unwrap-only wrapper is discovered and tracked", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		underlying := &unwrapOnly{ResponseWriter: rec}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		// Before the fix, ResponseController.Flush() on `wrapped` would
+		// unwrap straight past this tracker (via trackingResponseWriter's
+		// own Unwrap()) to rec's real Flush(), without tw ever being
+		// marked committed - the exact bypass assessment 0008/L1
+		// describes. Asserting through http.ResponseController here,
+		// rather than a direct wrapped.(http.Flusher) check, is what
+		// actually exercises that code path.
+		if err := http.NewResponseController(wrapped).Flush(); err != nil {
+			t.Fatalf("ResponseController.Flush() error = %v, want nil", err)
+		}
+		if !rec.Flushed {
+			t.Error("Flush() did not reach the real underlying recorder through the Unwrap-only layer")
+		}
+		if !tw.wroteHeader {
+			t.Error("tw.wroteHeader = false after a flush reached through an Unwrap-only wrapper, want true - this is the commit-tracking bypass assessment 0008/L1 describes")
+		}
+	})
+
+	t.Run("FlushError behind an Unwrap-only wrapper is discovered and preserved", func(t *testing.T) {
+		underlying := &unwrapOnly{ResponseWriter: &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("flush failed")}}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		err := http.NewResponseController(wrapped).Flush()
+		if err == nil || err.Error() != "flush failed" {
+			t.Errorf("ResponseController.Flush() error = %v, want the FlushError() error reached through the Unwrap-only layer to be preserved", err)
+		}
+		if !tw.wroteHeader {
+			t.Error("tw.wroteHeader = false after a FlushError reached through an Unwrap-only wrapper, want true")
+		}
+	})
+
+	t.Run("Hijacker behind an Unwrap-only wrapper is discovered and tracked", func(t *testing.T) {
+		hijackable := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		underlying := &unwrapOnly{ResponseWriter: hijackable}
+		wrapped, tw := newTrackingResponseWriter(underlying)
+
+		conn, _, err := http.NewResponseController(wrapped).Hijack()
+		if err != nil {
+			t.Fatalf("ResponseController.Hijack() error = %v, want nil", err)
+		}
+		defer func() { _ = conn.Close() }()
+		if !hijackable.hijacked {
+			t.Error("Hijack() did not reach the real underlying recorder through the Unwrap-only layer")
+		}
+		if !tw.wroteHeader {
+			t.Error("tw.wroteHeader = false after a hijack reached through an Unwrap-only wrapper, want true")
+		}
+	})
+
+	t.Run("a plain Flusher one layer down does not shadow a FlushError two layers down", func(t *testing.T) {
+		// http.ResponseController checks FlushError ahead of Flusher at
+		// each layer, then descends - so a plain Flusher at a shallower
+		// layer wins over a FlushError at a deeper one, since the
+		// traversal never reaches the deeper layer. discoverFlusher must
+		// reproduce that same per-layer priority, not "search every layer
+		// for FlushError first, then every layer for Flusher".
+		inner := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("should not be reached")}
+		shallow := &shallowFlusher{inner: inner}
+		wrapped, tw := newTrackingResponseWriter(&unwrapOnly{ResponseWriter: shallow})
+
+		if _, ok := wrapped.(interface{ FlushError() error }); ok {
+			t.Error("wrapped implements FlushError() error, want it not to - the shallower plain Flusher must shadow the deeper FlushError, matching http.ResponseController's own per-layer priority")
+		}
+		f, ok := wrapped.(http.Flusher)
+		if !ok {
+			t.Fatal("wrapped does not implement http.Flusher, want it to")
+		}
+		f.Flush()
+		if !tw.wroteHeader {
+			t.Error("Flush() should still mark the response committed")
+		}
+		if !shallow.flushed {
+			t.Error("the shallower plain Flush() was not called")
+		}
+	})
+}
+
+// shallowFlusher implements only plain http.Flusher (no FlushError), one
+// layer above a writer (inner) that implements FlushError - used to verify
+// discoverFlusher stops at the first layer with either capability instead
+// of preferring a deeper FlushError over a shallower plain Flusher.
+type shallowFlusher struct {
+	inner   *flushErrorWriter
+	flushed bool
+}
+
+func (w *shallowFlusher) Header() http.Header         { return w.inner.Header() }
+func (w *shallowFlusher) Write(b []byte) (int, error) { return w.inner.Write(b) }
+func (w *shallowFlusher) WriteHeader(code int)        { w.inner.WriteHeader(code) }
+func (w *shallowFlusher) Flush()                      { w.flushed = true }
+
+func TestRecoveryMiddlewareAbortsOnPanicAfterFlushThroughUnwrapOnlyWrapper(t *testing.T) {
+	// Reproduction of assessment 0008/L1, mirroring the existing
+	// "response committed via Flush without WriteHeader is not appended
+	// to" case above but with an Unwrap-only wrapper sitting BETWEEN the
+	// real writer and RecoveryMiddleware's own newTrackingResponseWriter
+	// call. Before the fix, newTrackingResponseWriter only checked the
+	// immediate writer (the unwrapOnly value, which has no Flusher of its
+	// own) for capabilities, so http.ResponseController.Flush() unwrapped
+	// straight past this package's tracker to the real recorder - flushing
+	// (and thereby committing, per net/http's own semantics) it without
+	// tw.wroteHeader ever being set. RecoveryMiddleware then took the
+	// uncommitted branch and appended a second, corrupting response on top
+	// of the first - the same externally-misleading result K1 (assessment
+	// 0007) already fixed for the direct-Flusher case.
+	logger := &recordingLogger{}
+	rec := httptest.NewRecorder()
+	handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("Flush() through the Unwrap-only wrapper failed unexpectedly: %v", err)
+		}
+		panic("boom after flush via an Unwrap-only wrapper")
+	}))
+
+	expectAbortHandler(t, handler, &unwrapOnly{ResponseWriter: rec}, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if !rec.Flushed {
+		t.Error("the real underlying recorder was never flushed - the Unwrap-only wrapper didn't reach it")
+	}
+	if got := rec.Body.String(); got != "" {
+		t.Errorf("body = %q, want empty (Flush commits the response through the Unwrap-only wrapper, so no error JSON should be appended on top of it)", got)
+	}
+
+	if len(logger.calls) != 1 {
+		t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+	}
+	if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
+		t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
+	}
 }
 
 func TestTrackingResponseWriterInformationalHeaderIsNotCommitment(t *testing.T) {
