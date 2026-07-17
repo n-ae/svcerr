@@ -366,6 +366,24 @@ func TestContractAuthenticateChallenge(t *testing.T) {
 	}
 }
 
+func TestContractRetryAfterHeaders(t *testing.T) {
+	// Both retry-hint-carrying types emit the standard header, clamped.
+	rec := httptest.NewRecorder()
+	svcerr.WriteJSON(rec, svcerr.NewRateLimitError("api", 100, 30))
+	if got := rec.Header().Get("Retry-After"); got != "30" {
+		t.Errorf("rate limit Retry-After = %q, want 30", got)
+	}
+
+	retryAfter := 45
+	upstream := svcerr.NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
+	upstream.RetryAfter = &retryAfter
+	rec = httptest.NewRecorder()
+	svcerr.WriteJSON(rec, upstream)
+	if got := rec.Header().Get("Retry-After"); got != "45" {
+		t.Errorf("external API Retry-After = %q, want 45", got)
+	}
+}
+
 func TestContractHeaderPolicy(t *testing.T) {
 	defer func() {
 		svcerr.SetHeaderPolicy(svcerr.HeaderPolicy{})

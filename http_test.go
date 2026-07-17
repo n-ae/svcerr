@@ -2647,6 +2647,9 @@ func TestExternalAPIErrorNegativeRetryAfterIsClampedInDetails(t *testing.T) {
 	if resp.Error.Details["retry_after"] != float64(0) {
 		t.Errorf("Details[retry_after] = %v, want 0", resp.Error.Details["retry_after"])
 	}
+	if got := w.Header().Get("Retry-After"); got != "0" {
+		t.Errorf("Retry-After = %q, want %q - the header emission clamps the same way the details do", got, "0")
+	}
 }
 
 // TestErrorLogFieldsCompleteness is the table-driven completeness test
@@ -2919,4 +2922,71 @@ func TestTrackingResponseWriterPanicsItselfOnAnInvalidStatus(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
 		t.Errorf("underlying writer was touched by an invalid status: Code=%d Body=%q", rec.Code, rec.Body.String())
 	}
+}
+
+// TestExternalAPIErrorRetryAfterHeader covers the v0.9.0 assessment's L2:
+// an ExternalAPIError carrying an upstream retry hint now emits it as the
+// standard Retry-After header on every rendering, consistent with
+// RateLimitError - previously it reached clients only as a retry_after
+// details member. Nil means no hint, so no header.
+func TestExternalAPIErrorRetryAfterHeader(t *testing.T) {
+	writers := map[string]func(http.ResponseWriter, error, Logger){
+		"WriteHTTPError":     WriteHTTPError,
+		"WriteHTTPErrorHTML": WriteHTTPErrorHTML,
+		"WriteHTTPProblem":   WriteHTTPProblem,
+	}
+
+	for name, write := range writers {
+		t.Run(name+"/set hint becomes the header", func(t *testing.T) {
+			retryAfter := 30
+			err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
+			err.RetryAfter = &retryAfter
+
+			w := httptest.NewRecorder()
+			write(w, err, nil)
+
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusBadGateway)
+			}
+			if got := w.Header().Get("Retry-After"); got != "30" {
+				t.Errorf("Retry-After = %q, want %q", got, "30")
+			}
+		})
+
+		t.Run(name+"/nil hint means no header", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			write(w, NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com"), nil)
+
+			if got := w.Header().Get("Retry-After"); got != "" {
+				t.Errorf("Retry-After = %q, want empty when no hint was recorded", got)
+			}
+		})
+
+		t.Run(name+"/negative hint is clamped at emission", func(t *testing.T) {
+			retryAfter := -5
+			err := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
+			err.RetryAfter = &retryAfter
+
+			w := httptest.NewRecorder()
+			write(w, err, nil)
+
+			if got := w.Header().Get("Retry-After"); got != "0" {
+				t.Errorf("Retry-After = %q, want %q (RFC 9110 §10.2.3 requires non-negative delay-seconds)", got, "0")
+			}
+		})
+	}
+
+	t.Run("a wrapper's code can't inherit a wrapped ExternalAPIError's header", func(t *testing.T) {
+		retryAfter := 30
+		inner := NewExternalAPIError("upstream", "upstream 503", 503, "https://api.example.com")
+		inner.RetryAfter = &retryAfter
+		outer := WrapInternalError(inner, "gateway", "request failed")
+
+		w := httptest.NewRecorder()
+		WriteHTTPError(w, outer, nil)
+
+		if got := w.Header().Get("Retry-After"); got != "" {
+			t.Errorf("Retry-After = %q, want empty - the outermost coded node is the InternalError, not the wrapped hint carrier", got)
+		}
+	})
 }

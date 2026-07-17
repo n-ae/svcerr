@@ -267,6 +267,17 @@ func (e *BaseError) PublicMessage() (string, bool) {
 // can be called more than once to add several keys. Whichever of
 // SetPublicDetail/RemovePublicDetail was called most recently for a given
 // key wins - calling this after RemovePublicDetail(key) un-suppresses it.
+//
+// The two response shapes place details differently, which matters for
+// six reserved names: WriteHTTPError/WriteJSON nest details under
+// error.details, where any key is fine, but WriteHTTPProblem/WriteProblem
+// flatten them to the top level of the RFC 9457 object, where "type",
+// "title", "status", "detail", "instance", and "code" are registered (or
+// package-owned) members - a detail with one of those names is silently
+// omitted from problem-details output rather than allowed to occupy the
+// member's slot. To set the real members, use SetProblemType,
+// SetProblemTitle, and SetProblemInstance; status, detail, and code
+// always come from the error's own classification.
 func (e *BaseError) SetPublicDetail(key string, value interface{}) {
 	delete(e.publicDetailRemovals, key)
 	if e.publicDetailAdditions == nil {
@@ -611,7 +622,12 @@ type ExternalAPIError struct {
 	Service    string // caller-defined service name, e.g. "yahoo", "nba_stats"
 	StatusCode int
 	URL        string
-	RetryAfter *int // seconds to retry after; not set by the constructors, assign it directly when known
+	// RetryAfter is seconds to retry after, e.g. propagated from the
+	// upstream's own Retry-After. Not set by the constructors - assign it
+	// directly when known. When set, the response writers emit it as the
+	// Retry-After header and the retry_after details member, clamped to
+	// non-negative at emission (RFC 9110 §10.2.3).
+	RetryAfter *int
 }
 
 // NewExternalAPIError creates a new external API error
@@ -818,7 +834,7 @@ type RateLimitError struct {
 // negative value is never valid on the wire. It's applied twice: at
 // construction, so the stored RetryAfter field and the "retry_after"
 // context entry start out valid, and again at emission
-// (rateLimitRetryAfterHeader, extractErrorDetails, errorLogFields) -
+// (retryAfterHeader, extractErrorDetails, errorLogFields) -
 // RetryAfter is an exported, writable field, so the construction-time
 // clamp is input cleanup, not an enforced invariant, and a negative
 // value assigned after construction would otherwise go straight into the

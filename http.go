@@ -225,7 +225,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 	// Skipped on the marshal-failure fallback: that response no longer
 	// represents err's own classification.
 	if marshalErr == nil {
-		rateLimitRetryAfterHeader(w.Header(), node)
+		retryAfterHeader(w.Header(), node)
 	}
 
 	setAuthenticateChallenge(w.Header(), statusCode, node)
@@ -348,7 +348,7 @@ func currentRecoveryHeaderPolicy() HeaderPolicy {
 // through a reused/pooled ResponseWriter-like object) may have set either
 // in anticipation of a response that never got written before this error
 // took over. Every caller of prepareErrorHeaders re-adds Retry-After
-// (rateLimitRetryAfterHeader) or WWW-Authenticate (setAuthenticateChallenge)
+// (retryAfterHeader) or WWW-Authenticate (setAuthenticateChallenge)
 // immediately afterward when err's own classification actually calls for
 // it, so a genuinely-applicable value is never lost. Neither deletion is
 // policy-controlled: unlike Content-Encoding, there's no middleware
@@ -376,23 +376,34 @@ func prepareErrorHeaders(h http.Header, contentType string, policy HeaderPolicy)
 	h.Set("X-Content-Type-Options", "nosniff")
 }
 
-// rateLimitRetryAfterHeader sets Retry-After when node (the same
-// outermost-coded node used for everything else in err's classification)
-// is a *RateLimitError, so an outer wrapper's code can't inherit a wrapped
-// RateLimitError's header. Shared by all three response writers; skipped
+// retryAfterHeader sets Retry-After when node (the same outermost-coded
+// node used for everything else in err's classification) carries a retry
+// hint: a *RateLimitError's RetryAfter, or a *ExternalAPIError's non-nil
+// RetryAfter (an upstream's own retry hint a gateway chose to record -
+// RFC 9110 permits Retry-After on any response, and both types already
+// expose the same value to clients as a retry_after details member, so
+// the standard header is the strictly more useful spelling). Using the
+// classification node means an outer wrapper's code can't inherit a
+// wrapped error's header. Shared by all three response writers; skipped
 // on the marshal-failure fallback by the JSON/problem+json callers, since
 // that response no longer represents err's own classification.
 //
-// RetryAfter is re-clamped here, at the wire boundary, because it's an
-// exported writable field: the constructors' clampRetryAfter is only
-// input cleanup, and a negative value assigned after construction would
-// otherwise become an invalid Retry-After (RFC 9110 §10.2.3 requires a
-// non-negative delay-seconds). extractErrorDetails and errorLogFields
-// clamp the same way, so the header, the JSON details, and the log field
-// always agree.
-func rateLimitRetryAfterHeader(h http.Header, node coderError) {
-	if rle, ok := node.(*RateLimitError); ok {
-		h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(rle.RetryAfter)))
+// RetryAfter is re-clamped here, at the wire boundary, because both
+// fields are exported and writable: RateLimitError's constructor clamp is
+// only input cleanup, and ExternalAPIError's field is documented for
+// direct assignment with no constructor involved at all - a negative
+// value would otherwise become an invalid Retry-After (RFC 9110 §10.2.3
+// requires a non-negative delay-seconds). extractErrorDetails and
+// errorLogFields clamp the same way, so the header, the JSON details,
+// and the log field always agree.
+func retryAfterHeader(h http.Header, node coderError) {
+	switch v := node.(type) {
+	case *RateLimitError:
+		h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(v.RetryAfter)))
+	case *ExternalAPIError:
+		if v.RetryAfter != nil {
+			h.Set("Retry-After", fmt.Sprintf("%d", clampRetryAfter(*v.RetryAfter)))
+		}
 	}
 }
 
@@ -486,7 +497,7 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error, policy HeaderPolicy) (
 	node := outermostCoded(err)
 
 	prepareErrorHeaders(w.Header(), "text/html; charset=utf-8", policy)
-	rateLimitRetryAfterHeader(w.Header(), node)
+	retryAfterHeader(w.Header(), node)
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 	w.WriteHeader(statusCode)
 
@@ -632,7 +643,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, policy HeaderPolicy)
 	prepareErrorHeaders(w.Header(), "application/problem+json", policy)
 
 	if marshalErr == nil {
-		rateLimitRetryAfterHeader(w.Header(), node)
+		retryAfterHeader(w.Header(), node)
 	}
 
 	setAuthenticateChallenge(w.Header(), statusCode, node)
@@ -804,7 +815,8 @@ func extractErrorDetails(err error) map[string]interface{} {
 		if v.RetryAfter != nil {
 			// Clamped like RateLimitError's: this field is documented for
 			// direct post-construction assignment, so no constructor ever
-			// vetted it.
+			// vetted it. Also emitted as the Retry-After header - see
+			// retryAfterHeader.
 			details["retry_after"] = clampRetryAfter(*v.RetryAfter)
 		}
 	case *NotFoundError:
@@ -814,7 +826,7 @@ func extractErrorDetails(err error) map[string]interface{} {
 		}
 	case *RateLimitError:
 		details["limit"] = v.Limit
-		// Re-clamped at emission - see rateLimitRetryAfterHeader.
+		// Re-clamped at emission - see retryAfterHeader.
 		details["retry_after"] = clampRetryAfter(v.RetryAfter)
 	}
 
@@ -895,7 +907,7 @@ func errorLogFields(err error, statusCode int) (Level, map[string]interface{}) {
 		fields["service"] = v.Service
 		fields["limit"] = v.Limit
 		// Clamped to match what the response writers actually sent - see
-		// rateLimitRetryAfterHeader.
+		// retryAfterHeader.
 		fields["retry_after"] = clampRetryAfter(v.RetryAfter)
 	case *InternalError:
 		fields["component"] = v.Component

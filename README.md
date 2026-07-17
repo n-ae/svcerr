@@ -366,6 +366,18 @@ err.SetPublicDetail("sku", sku)
 err.SetPublicDetail("available", 0)
 ```
 
+**Six names are reserved in problem-details output.** The JSON writers
+nest details under `error.details`, where any key is fine - but
+`WriteHTTPProblem`/`WriteProblem` flatten details to the top level of the
+RFC 9457 object, where `type`, `title`, `status`, `detail`, `instance`,
+and `code` are registered (or package-owned) members. A public detail
+with one of those names is **silently omitted** from problem-details
+output (it still appears in the plain-JSON shape), so the same error can
+render different details depending on the writer. Use `SetProblemType`,
+`SetProblemTitle`, and `SetProblemInstance` for the real members;
+`status`, `detail`, and `code` always come from the error's own
+classification.
+
 **`RemovePublicDetail` only touches the `details` map - not the
 message.** `NewNotFoundError(resourceType, resourceID)`'s own message
 embeds `resourceID` directly (`"user not found: secret@example.com"`), and
