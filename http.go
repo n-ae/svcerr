@@ -105,6 +105,31 @@ func HTTPStatusCode(code ErrorCode) int {
 	}
 }
 
+// WriteResult reports what WriteJSONResult/WriteHTMLResult/
+// WriteProblemResult actually did, for a caller that wants to detect a
+// serialization or delivery failure without participating in this
+// package's Logger contract. WriteHTTPError/WriteHTTPErrorHTML/
+// WriteHTTPProblem carry the same information into their log fields
+// (response_render_error, response_write_error, rendered_error_code)
+// instead of returning it; the plain WriteJSON/WriteHTML/WriteProblem
+// functions discard it entirely, same as before this type existed.
+type WriteResult struct {
+	// Status is the HTTP status code actually sent - the fallback 500 on
+	// a marshal failure, not necessarily err's own classification.
+	Status int
+	// RenderErr is the marshal error when the real body couldn't be
+	// JSON-encoded and a generic fallback was substituted instead (nil
+	// otherwise). Always nil from WriteHTMLResult, whose body is plain
+	// string concatenation and can't fail to encode.
+	RenderErr error
+	// WriteErr is whatever the final w.Write returned (nil on a full
+	// write) - a client disconnect, an expired deadline, or any other
+	// transport failure during delivery. Unlike RenderErr, it doesn't
+	// imply a different body was sent, only that delivery of the
+	// intended one may have failed or been truncated.
+	WriteErr error
+}
+
 // WriteHTTPError writes a standardized error response to the HTTP response writer
 func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err)
@@ -116,10 +141,19 @@ func WriteHTTPError(w http.ResponseWriter, err error, logger Logger) {
 // the logging call, for a caller that wants to own reporting separately
 // (its own Reporter, a nil Logger via WriteHTTPError, or none at all)
 // instead of participating in this package's Logger contract just to
-// render a response.
+// render a response. Use WriteJSONResult instead to also see a
+// render/write failure this discards.
 func WriteJSON(w http.ResponseWriter, err error) int {
-	statusCode, _, _ := writeJSONErrorBody(w, err)
-	return statusCode
+	return WriteJSONResult(w, err).Status
+}
+
+// WriteJSONResult mirrors WriteJSON, additionally reporting a render or
+// write failure - e.g. so a caller can avoid claiming success to its own
+// caller, or report the failure through its own error-tracking system
+// instead of this package's Logger contract.
+func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
+	statusCode, renderErr, writeErr := writeJSONErrorBody(w, err)
+	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
 }
 
 // writeJSONErrorBody writes err's JSON body and headers to w and returns
@@ -264,10 +298,18 @@ func WriteHTTPErrorHTML(w http.ResponseWriter, err error, logger Logger) {
 	logError(logger, err, statusCode, nil, writeErr)
 }
 
-// WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML writes.
+// WriteHTML mirrors WriteJSON for the HTML rendering WriteHTTPErrorHTML
+// writes. Use WriteHTMLResult instead to also see a write failure this
+// discards.
 func WriteHTML(w http.ResponseWriter, err error) int {
-	statusCode, _ := writeHTMLErrorBody(w, err)
-	return statusCode
+	return WriteHTMLResult(w, err).Status
+}
+
+// WriteHTMLResult mirrors WriteJSONResult for the HTML rendering.
+// RenderErr is always nil - see WriteResult.
+func WriteHTMLResult(w http.ResponseWriter, err error) WriteResult {
+	statusCode, writeErr := writeHTMLErrorBody(w, err)
+	return WriteResult{Status: statusCode, WriteErr: writeErr}
 }
 
 // writeHTMLErrorBody mirrors writeJSONErrorBody for the HTML response.
@@ -336,10 +378,17 @@ func WriteHTTPProblem(w http.ResponseWriter, err error, logger Logger) {
 	logError(logger, err, statusCode, renderErr, writeErr)
 }
 
-// WriteProblem mirrors WriteJSON for the RFC 9457 rendering WriteHTTPProblem writes.
+// WriteProblem mirrors WriteJSON for the RFC 9457 rendering
+// WriteHTTPProblem writes. Use WriteProblemResult instead to also see a
+// render/write failure this discards.
 func WriteProblem(w http.ResponseWriter, err error) int {
-	statusCode, _, _ := writeProblemJSONBody(w, err)
-	return statusCode
+	return WriteProblemResult(w, err).Status
+}
+
+// WriteProblemResult mirrors WriteJSONResult for the RFC 9457 rendering.
+func WriteProblemResult(w http.ResponseWriter, err error) WriteResult {
+	statusCode, renderErr, writeErr := writeProblemJSONBody(w, err)
+	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
 }
 
 // writeProblemJSONBody mirrors writeJSONErrorBody for the problem+json body.
@@ -670,9 +719,22 @@ func logError(logger Logger, err error, statusCode int, renderErr, writeErr erro
 	safeLog(logger, level, err, fields, "HTTP error response")
 }
 
-// safeLog calls logger.Log if logger is non-nil. A nil Logger is
-// tolerated (not an error) everywhere this package logs, so
-// WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem/RecoveryMiddleware
+// safeLog calls logger.Log if logger is non-nil, containing a panic from
+// within that call so it can't escape and replace whatever this package
+// was itself in the middle of reporting. That matters most in
+// RecoveryMiddleware: its own recover() has already fired once for the
+// handler's original panic by the time it calls safeLog, so a second,
+// uncaught panic from a broken Logger would propagate out of that
+// already-executing deferred function - past this package entirely,
+// caught only by net/http's own outer per-connection recovery, which
+// drops the original panic's structured log record (error code, stack
+// trace, request path) and prints a generic stdlib trace pointing at the
+// logger instead. There's nowhere further to report a logger's own
+// failure to - the logger is what would have received that report - so
+// it's contained and silently dropped rather than escalated.
+//
+// A nil Logger is tolerated (not an error) everywhere this package logs,
+// so WriteHTTPError/WriteHTTPErrorHTML/WriteHTTPProblem/RecoveryMiddleware
 // stay usable by a caller that doesn't want logging at all, without
 // forcing them to plumb through a no-op implementation just to avoid a
 // nil-pointer panic. Callers who want response rendering with no logging
@@ -682,6 +744,7 @@ func safeLog(logger Logger, level Level, err error, fields map[string]interface{
 	if logger == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	logger.Log(level, err, fields, msg)
 }
 
@@ -767,17 +830,23 @@ type flushErrorer interface {
 	FlushError() error
 }
 
-// commitOnFlushError delegates to fe.FlushError(), only marking tw
-// committed when it reports success - unlike commitOnFlush, which has no
-// error to check and so always marks committed. A real flush failure must
-// not be treated as though the response were successfully sent.
+// commitOnFlushError marks tw committed before delegating to
+// fe.FlushError(), matching what a real FlushError implementation - the
+// stdlib HTTP/1.1 server's response.FlushError, and anything wrapping it -
+// actually does: WriteHeader(200) is sent unconditionally before the
+// flush is even attempted, so a flush failure (a broken connection
+// partway through) can happen after the status line and headers are
+// already on the wire. Marking committed only on success, as if the
+// commitment itself were conditional on the flush succeeding, would leave
+// RecoveryMiddleware believing it's still safe to write a fresh JSON
+// error body - a second response onto a connection that may have already
+// received the first one's headers.
 func commitOnFlushError(tw *trackingResponseWriter, fe flushErrorer) error {
-	err := fe.FlushError()
-	if err == nil && !tw.wroteHeader {
+	if !tw.wroteHeader {
 		tw.wroteHeader = true
 		tw.status = http.StatusOK
 	}
-	return err
+	return fe.FlushError()
 }
 
 // commitOnHijack hijacks through hj, marking tw committed on success -
@@ -963,14 +1032,24 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 					// The handler already committed a response before
 					// panicking - the status can't be changed at this
 					// point, and writing another body would just corrupt
-					// what was already sent, so only log.
+					// what was already sent. Log, then abort the
+					// connection instead of returning normally: a plain
+					// return here lets net/http treat whatever partial
+					// bytes the handler managed to write as a complete,
+					// successful response - the client sees a clean 200
+					// with a truncated or invalid body and no transport-
+					// level signal anything went wrong. http.ErrAbortHandler
+					// is net/http's documented signal for exactly this -
+					// it closes the HTTP/1 connection (or resets the
+					// HTTP/2 stream) without an additional "http: panic
+					// serving" log line, unlike a bare re-panic of rec.
 					_, fields := errorLogFields(err, tw.status)
 					fields["panic"] = rec
 					fields["method"] = r.Method
 					fields["path"] = r.URL.Path
 					fields["response_committed_status"] = tw.status
 					safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler after response was already committed")
-					return
+					panic(http.ErrAbortHandler)
 				}
 
 				// err here is always this package's own WrapInternalError/
@@ -988,6 +1067,16 @@ func RecoveryMiddleware(logger Logger) func(http.Handler) http.Handler {
 					fields["response_write_error"] = writeErr.Error()
 				}
 				safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler")
+
+				if writeErr != nil {
+					// The replacement error body itself failed to fully
+					// write (client disconnect, expired deadline, ...) -
+					// the client may have received a partial, invalid
+					// document that looks like a truncated success, the
+					// same problem as the already-committed case above.
+					// Abort rather than return normally.
+					panic(http.ErrAbortHandler)
+				}
 			}()
 
 			next.ServeHTTP(wrapped, r)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -876,6 +877,116 @@ func TestWriteProblemFallsBackOnUnencodableDetail(t *testing.T) {
 	}
 }
 
+func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
+	err := NewNotFoundError("league", "1")
+
+	t.Run("WriteJSONResult", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		got := WriteJSONResult(w, err)
+		if got.Status != http.StatusNotFound {
+			t.Errorf("Status = %d, want %d", got.Status, http.StatusNotFound)
+		}
+		if got.RenderErr != nil || got.WriteErr != nil {
+			t.Errorf("RenderErr/WriteErr = %v/%v, want nil/nil on a normal write", got.RenderErr, got.WriteErr)
+		}
+
+		other := httptest.NewRecorder()
+		if wantStatus := WriteJSON(other, err); got.Status != wantStatus || w.Body.String() != other.Body.String() {
+			t.Errorf("WriteJSONResult diverged from WriteJSON: status %d vs %d, body %q vs %q", got.Status, wantStatus, w.Body.String(), other.Body.String())
+		}
+	})
+
+	t.Run("WriteHTMLResult", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		got := WriteHTMLResult(w, err)
+		if got.Status != http.StatusNotFound {
+			t.Errorf("Status = %d, want %d", got.Status, http.StatusNotFound)
+		}
+		if got.RenderErr != nil {
+			t.Error("RenderErr should always be nil for HTML - the body is plain string concatenation, not JSON")
+		}
+		if got.WriteErr != nil {
+			t.Errorf("WriteErr = %v, want nil on a normal write", got.WriteErr)
+		}
+	})
+
+	t.Run("WriteProblemResult", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		got := WriteProblemResult(w, err)
+		if got.Status != http.StatusNotFound {
+			t.Errorf("Status = %d, want %d", got.Status, http.StatusNotFound)
+		}
+		if got.RenderErr != nil || got.WriteErr != nil {
+			t.Errorf("RenderErr/WriteErr = %v/%v, want nil/nil on a normal write", got.RenderErr, got.WriteErr)
+		}
+	})
+
+	t.Run("WriteJSONResult reports a render failure", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		bad := New(ErrCodeInvalidInput, "invalid")
+		bad.SetPublicDetail("bad", make(chan int))
+
+		got := WriteJSONResult(w, bad)
+		if got.Status != http.StatusInternalServerError {
+			t.Errorf("Status = %d, want %d", got.Status, http.StatusInternalServerError)
+		}
+		if got.RenderErr == nil {
+			t.Error("RenderErr = nil, want the marshal error - a caller using the Result API should be able to detect this without a Logger")
+		}
+	})
+
+	t.Run("WriteJSONResult reports a write failure", func(t *testing.T) {
+		w := &failingWriter{}
+		got := WriteJSONResult(w, err)
+		if got.WriteErr == nil {
+			t.Error("WriteErr = nil, want the write failure")
+		}
+	})
+}
+
+func TestSafeLogContainsAPanickingLogger(t *testing.T) {
+	// safeLog must not let a broken Logger's own panic escape - inside
+	// RecoveryMiddleware, that panic would propagate out of svcerr's
+	// already-executing recover(), uncaught, replacing the original
+	// panic's diagnostics with a generic trace pointing at the logger.
+	panicking := loggerFunc(func(Level, error, map[string]interface{}, string) {
+		panic("logger is broken")
+	})
+
+	didPanic := func() (panicked bool) {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		safeLog(panicking, LevelError, nil, nil, "test")
+		return false
+	}()
+
+	if didPanic {
+		t.Error("safeLog let the logger's own panic escape, want it contained")
+	}
+}
+
+func TestRecoveryMiddlewareSurvivesAPanickingLogger(t *testing.T) {
+	// End-to-end: a Logger that panics must not prevent RecoveryMiddleware
+	// from still turning the handler's original panic into a proper error
+	// response - the whole point of the middleware.
+	panicking := loggerFunc(func(Level, error, map[string]interface{}, string) {
+		panic("logger is broken")
+	})
+	handler := RecoveryMiddleware(panicking)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("original bug")
+	}))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d (a panicking logger must not prevent the error response from being written)", w.Code, http.StatusInternalServerError)
+	}
+}
+
 func TestWriteHTTPErrorToleratesNilLogger(t *testing.T) {
 	// A nil Logger must not panic - callers who only want the response
 	// rendered (no logging contract) can pass nil instead of a no-op
@@ -1241,8 +1352,13 @@ func TestResponseControllerPreservesFlushError(t *testing.T) {
 		if err == nil || err.Error() != "flush failed" {
 			t.Errorf("ResponseController.Flush() error = %v, want the underlying FlushError() error to be preserved, not shadowed by a plain http.Flusher passthrough", err)
 		}
-		if tw.wroteHeader {
-			t.Error("a failed FlushError() must not mark the response committed")
+		// Matches real net/http: WriteHeader(200) commits before the flush
+		// is even attempted, so a failure can happen after the status line
+		// is already on the wire - marking committed only on success would
+		// leave RecoveryMiddleware believing a fresh response is still safe
+		// to write.
+		if !tw.wroteHeader {
+			t.Error("a failed FlushError() should still mark the response committed, the same way a real net/http FlushError commits before attempting the flush")
 		}
 	})
 
@@ -1258,14 +1374,14 @@ func TestResponseControllerPreservesFlushError(t *testing.T) {
 		}
 	})
 
-	t.Run("plain Flush() still discards the error but still delegates through FlushError", func(t *testing.T) {
+	t.Run("plain Flush() still discards the error but still commits and delegates through FlushError", func(t *testing.T) {
 		underlying := &flushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: errors.New("flush failed")}
 		wrapped, tw := newTrackingResponseWriter(underlying)
 
 		wrapped.(http.Flusher).Flush()
 
-		if tw.wroteHeader {
-			t.Error("Flush() delegating to a failing FlushError() must not mark the response committed, even though http.Flusher's signature can't report the failure to the caller")
+		if !tw.wroteHeader {
+			t.Error("Flush() delegating to a failing FlushError() should still mark the response committed, even though http.Flusher's signature can't report the failure to the caller")
 		}
 	})
 
@@ -1393,6 +1509,24 @@ func TestTrackingResponseWriterHijack(t *testing.T) {
 			t.Error("a successful Hijack() should mark the response committed, so RecoveryMiddleware won't write a JSON body over the now-raw connection")
 		}
 	})
+}
+
+// expectAbortHandler runs handler via a real ServeHTTP call, asserting it
+// panics with http.ErrAbortHandler instead of returning normally - the
+// signal RecoveryMiddleware re-panics with after logging a panic it can no
+// longer safely turn into a fresh response body (the response was already
+// committed, or the replacement body it wrote failed to fully deliver).
+// Recovers that panic itself so it doesn't escape the test goroutine.
+func expectAbortHandler(t *testing.T, handler http.Handler, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	defer func() {
+		rec := recover()
+		if rec != http.ErrAbortHandler {
+			t.Errorf("recovered %v, want it to re-panic with http.ErrAbortHandler", rec)
+		}
+	}()
+	handler.ServeHTTP(w, r)
+	t.Error("ServeHTTP returned normally, want it to panic with http.ErrAbortHandler")
 }
 
 func TestRecoveryMiddleware(t *testing.T) {
@@ -1556,10 +1690,12 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}))
 
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		expectAbortHandler(t, handler, w, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		// The 200 already sent to the client can't be retracted - the
-		// recorder keeps whatever status was written first.
+		// recorder keeps whatever status was written first. The abort
+		// (rather than a normal return) is what stops net/http from then
+		// treating this truncated body as a complete, successful response.
 		if w.Code != http.StatusOK {
 			t.Errorf("status = %d, want %d (already committed, can't be changed)", w.Code, http.StatusOK)
 		}
@@ -1588,7 +1724,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}))
 
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		expectAbortHandler(t, handler, w, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if w.Code != http.StatusOK {
 			t.Errorf("status = %d, want %d (Write without WriteHeader implies 200)", w.Code, http.StatusOK)
@@ -1618,7 +1754,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}))
 
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		expectAbortHandler(t, handler, w, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if got := w.Body.String(); got != "" {
 			t.Errorf("body = %q, want empty (Flush commits the response, so no error JSON should be appended on top of it)", got)
@@ -1689,22 +1825,40 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 	t.Run("panic after an informational 1xx header still gets the error response", func(t *testing.T) {
 		// httptest.ResponseRecorder, unlike a real net/http server
-		// connection, has no special handling for repeated WriteHeader
-		// calls carrying a 1xx status - it just latches its Code/body on
-		// the first call regardless of status, so it can't faithfully
-		// stand in for what a real client would receive here. What this
-		// test can verify reliably is RecoveryMiddleware's own decision:
-		// the log message it chose proves whether it believed the
-		// response was still safe to write to (the plain message) or
-		// already committed (the committed-response variant).
+		// connection, has no special handling for a 1xx WriteHeader call
+		// followed by a final one - it just latches its Code/wroteHeader
+		// on the first call regardless of status and then refuses the
+		// later body as "not allowed for this status" (103 doesn't permit
+		// one), which would make the real fix (aborting on a write
+		// failure) fire here on a test-double artifact that can't happen
+		// against a real connection. Run this one against a real server
+		// instead, so 1xx is handled the way net/http itself handles it.
 		logger := &recordingLogger{}
 		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusEarlyHints) // 103 - not the final response
 			panic("boom after an informational header")
 		}))
 
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		server := httptest.NewServer(handler)
+		defer server.Close()
+
+		resp, err := http.Get(server.URL)
+		if err != nil {
+			t.Fatalf("http.Get() error = %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+		}
+		var errResp HTTPErrorResponse
+		if jsonErr := json.Unmarshal(body, &errResp); jsonErr != nil {
+			t.Fatalf("body is not valid JSON: %v (body: %s)", jsonErr, body)
+		}
+		if errResp.Error.Code != ErrCodeInternal {
+			t.Errorf("Error.Code = %v, want %v", errResp.Error.Code, ErrCodeInternal)
+		}
 
 		if len(logger.calls) != 1 {
 			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
@@ -1730,7 +1884,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 			panic("boom after hijack")
 		}))
 
-		handler.ServeHTTP(underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+		expectAbortHandler(t, handler, underlying, httptest.NewRequest(http.MethodGet, "/", nil))
 
 		if underlying.Body.Len() != 0 {
 			t.Errorf("body = %q, want empty (nothing should be written to a hijacked connection)", underlying.Body.String())
@@ -1794,6 +1948,31 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if resp.Error.Code != ErrCodeInternal {
 			t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+		}
+	})
+
+	t.Run("failure writing the replacement body also aborts instead of returning normally", func(t *testing.T) {
+		// Not-yet-committed panic path, but the replacement JSON error
+		// body itself fails to write (client disconnect, expired
+		// deadline, ...) - the client may have received a partial,
+		// invalid document, the same "looks like success, isn't" problem
+		// as panicking after the response was already committed.
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			panic("boom")
+		}))
+
+		w := &failingWriter{}
+		expectAbortHandler(t, handler, w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
+		}
+		if logger.calls[0].msg != "Panic recovered in HTTP handler" {
+			t.Errorf("log msg = %q, want the not-yet-committed variant (the panic itself wasn't after a commit - only the replacement write failed)", logger.calls[0].msg)
+		}
+		if _, ok := logger.calls[0].fields["response_write_error"]; !ok {
+			t.Error(`fields["response_write_error"] missing, want the write failure recorded before the abort`)
 		}
 	})
 }

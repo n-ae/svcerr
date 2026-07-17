@@ -163,6 +163,20 @@ one a wrapper is about to honor. If you use this kind of compression
 middleware, put it *inside* (called before) any of this package's
 writers, not outside/wrapping them.
 
+**`ETag`, `Last-Modified`, and `Accept-Ranges` are left alone**, unlike
+`Content-Length`/`Content-Encoding`/`Trailer`/`Retry-After`/
+`WWW-Authenticate`, which every writer clears. Those three describe a
+specific successful representation - if a handler set one in anticipation
+of the response it never got to send (an `ETag` for content that won't
+match the error body, say), it can still be present on the error response
+that replaces it. This is deliberate: unlike a wrong `Content-Length` or
+`Content-Encoding`, a stale conditional-request header doesn't actively
+mislead a client about the body it's receiving, and a plain `WriteJSON`
+call may legitimately want to preserve headers a handler set for reasons
+unrelated to the error. It's most likely to matter for
+`RecoveryMiddleware` specifically, where the response is replacing an
+abandoned success path rather than being the request's only response.
+
 ### Error types
 
 `ValidationError`, `DatabaseError`, `ExternalAPIError`, `AuthenticationError`,
