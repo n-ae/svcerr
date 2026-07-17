@@ -221,6 +221,33 @@ func (w *failingWriter) WriteHeader(status int) {
 	w.status = status
 }
 
+// shortWriter is an http.ResponseWriter whose Write returns fewer bytes
+// than it was given with a nil error - violating io.Writer's documented
+// contract ("Write must return a non-nil error if it returns n <
+// len(p)"), which every real net/http-backed writer honors. Used to verify
+// checkedWrite's hardening against a non-conforming writer (assessment
+// 0008's short-write finding) rather than a realistic transport failure,
+// which failingWriter above already covers.
+type shortWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *shortWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	return len(p) / 2, nil
+}
+
+func (w *shortWriter) WriteHeader(status int) {
+	w.status = status
+}
+
 func TestWriteHTTPError(t *testing.T) {
 	t.Run("not found error", func(t *testing.T) {
 		w := httptest.NewRecorder()
@@ -997,6 +1024,30 @@ func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 		got := WriteJSONResult(w, err)
 		if got.WriteErr == nil {
 			t.Error("WriteErr = nil, want the write failure")
+		}
+	})
+
+	t.Run("WriteJSONResult reports a short write as a failure", func(t *testing.T) {
+		w := &shortWriter{}
+		got := WriteJSONResult(w, err)
+		if got.WriteErr != io.ErrShortWrite {
+			t.Errorf("WriteErr = %v, want %v (assessment 0008 short-write hardening: a Write returning n < len(p) with a nil error violates io.Writer's contract and must not be treated as a full write)", got.WriteErr, io.ErrShortWrite)
+		}
+	})
+
+	t.Run("WriteHTMLResult reports a short write as a failure", func(t *testing.T) {
+		w := &shortWriter{}
+		got := WriteHTMLResult(w, err)
+		if got.WriteErr != io.ErrShortWrite {
+			t.Errorf("WriteErr = %v, want %v", got.WriteErr, io.ErrShortWrite)
+		}
+	})
+
+	t.Run("WriteProblemResult reports a short write as a failure", func(t *testing.T) {
+		w := &shortWriter{}
+		got := WriteProblemResult(w, err)
+		if got.WriteErr != io.ErrShortWrite {
+			t.Errorf("WriteErr = %v, want %v", got.WriteErr, io.ErrShortWrite)
 		}
 	})
 }

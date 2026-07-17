@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -160,6 +161,22 @@ func WriteJSONResult(w http.ResponseWriter, err error) WriteResult {
 	return WriteResult{Status: statusCode, RenderErr: renderErr, WriteErr: writeErr}
 }
 
+// checkedWrite writes body to w, returning an error if either Write itself
+// failed or Write returned fewer bytes than len(body) with a nil error - a
+// short write with no error violates io.Writer's documented contract
+// ("Write must return a non-nil error if it returns n < len(p)"), which
+// every real net/http-backed writer already honors. This guards
+// specifically against a non-conforming custom writer, test double, or
+// future adapter that violates that contract and would otherwise have a
+// truncated body silently treated as a fully-delivered response.
+func checkedWrite(w http.ResponseWriter, body []byte) error {
+	n, err := w.Write(body)
+	if err == nil && n != len(body) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+
 // writeJSONErrorBody writes err's JSON body and headers to w and returns
 // the status code used, without logging, plus the marshal error when the
 // real body couldn't be encoded and a generic fallback was substituted
@@ -204,7 +221,7 @@ func writeJSONErrorBody(w http.ResponseWriter, err error) (statusCode int, rende
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	_, writeErr = w.Write(body)
+	writeErr = checkedWrite(w, body)
 
 	return statusCode, renderErr, writeErr
 }
@@ -333,7 +350,7 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error) (statusCode int, write
 		`<p>` + html.EscapeString(message) + `</p>` +
 		`</div>`
 
-	_, writeErr = w.Write([]byte(body))
+	writeErr = checkedWrite(w, []byte(body))
 
 	return statusCode, writeErr
 }
@@ -454,7 +471,7 @@ func writeProblemJSONBody(w http.ResponseWriter, err error) (statusCode int, ren
 	setAuthenticateChallenge(w.Header(), statusCode, node)
 
 	w.WriteHeader(statusCode)
-	_, writeErr = w.Write(body)
+	writeErr = checkedWrite(w, body)
 
 	return statusCode, renderErr, writeErr
 }
