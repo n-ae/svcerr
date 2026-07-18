@@ -217,9 +217,10 @@ holds: put this kind of compression middleware *inside* (called before)
 any of this package's writers, not outside/wrapping them.
 
 **`ETag`, `Last-Modified`, and `Accept-Ranges` are left alone by
-default**, unlike
-`Content-Length`/`Content-Encoding`/`Trailer`/`Retry-After`/
-`WWW-Authenticate`, which every writer clears. Those three describe a
+default**, unlike `Content-Length`/`Trailer`/`Retry-After`/
+`WWW-Authenticate`, which every writer clears unconditionally, and
+`Content-Encoding`, which is cleared by default but preserved when
+`KeepContentEncoding` is set (see above). Those three describe a
 specific successful representation - if a handler set one in anticipation
 of the response it never got to send (an `ETag` for content that won't
 match the error body, say), it can still be present on the error response
@@ -520,8 +521,9 @@ func validateTeamID(id string) error {
 
 Errors aren't safe for concurrent mutation. `SetPublicMessage`,
 `SetPublicDetail`, `RemovePublicDetail`, `SetProblemType`,
-`SetProblemInstance`, `SetProblemTitle`, `SetAuthenticateChallenge`, and
-`RecaptureStackTrace` all mutate the receiver in place with no locking.
+`SetProblemInstance`, `SetProblemTitle`, `SetAuthenticateChallenge`,
+`ExternalAPIError.SetRetryAfter`, and `RecaptureStackTrace` all mutate
+the receiver in place with no locking.
 That's fine for the normal pattern - construct an error, configure it,
 return it - but don't call these once an error might be read or mutated
 from another goroutine.
