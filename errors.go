@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"runtime"
 	"strings"
 )
@@ -1073,10 +1074,25 @@ type coderError interface {
 // data that the wrapping was meant to hide.
 func outermostCoded(err error) coderError {
 	var c coderError
-	if errors.As(err, &c) {
+	if errors.As(err, &c) && !isNilValue(c) {
 		return c
 	}
 	return nil
+}
+
+// isNilValue reports whether v is an interface holding a nil pointer - the
+// classic Go footgun where a typed nil assigned to an interface variable
+// compares != nil but panics on any method call that dereferences the
+// (absent) receiver. errors.As matches on type, not nilness, so a
+// `var appErr *BaseError; var err error = appErr` reaches here as a "found"
+// coderError despite being unusable - outermostCoded treats that the same
+// as no match at all. Every built-in error type in this package is a
+// pointer receiver, which is also the idiomatic shape for a custom error
+// type, so a pointer check covers the realistic case without reflect
+// contortions for kinds (map, chan, func) no error type in practice uses.
+func isNilValue(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // ownMessager is implemented by every BaseError-derived type via

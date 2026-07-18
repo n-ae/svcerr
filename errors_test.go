@@ -654,6 +654,36 @@ func TestGetErrorCodeWithMinimalCoderType(t *testing.T) {
 	}
 }
 
+// TestGetErrorCodeWithTypedNilCoder guards the classic Go footgun: a nil
+// pointer assigned to an error variable produces a non-nil interface value
+// (err == nil is false) whose concrete type still matches errors.As. Before
+// outermostCoded filtered this case, GetErrorCode would call Code() on the
+// nil receiver and panic instead of returning ErrCodeInternal.
+func TestGetErrorCodeWithTypedNilCoder(t *testing.T) {
+	var nilCoder *minimalCodedError
+	var err error = nilCoder
+
+	if err == nil {
+		t.Fatal("sanity check failed: a typed nil assigned to error should compare != nil")
+	}
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v (a typed-nil Coder must classify as internal, not dereference)", got, ErrCodeInternal)
+	}
+
+	var nilBaseErr *BaseError
+	err = nilBaseErr
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v for a typed-nil *BaseError", got, ErrCodeInternal)
+	}
+
+	var nilNotFound *NotFoundError
+	err = nilNotFound
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v for a typed-nil *NotFoundError", got, ErrCodeInternal)
+	}
+}
+
 // minimalCodedUnwrappableError implements Coder, error, and Unwrap, but not
 // StackTracer - to verify getUserFriendlyMessage/UserMessage's safety
 // property (never surface a wrapped cause's text without an explicit

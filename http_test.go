@@ -1113,6 +1113,31 @@ func TestWriteJSONFallsBackOnUnencodableDetail(t *testing.T) {
 	}
 }
 
+func TestWriteJSONWithTypedNilCodedError(t *testing.T) {
+	// A function declared to return *NotFoundError that returns a nil
+	// pointer on some path, then assigned to a plain error variable before
+	// reaching WriteJSON, produces exactly this: err == nil is false, but
+	// the pointer underneath is nil. This must classify as an internal
+	// error, not panic - see outermostCoded's isNilValue guard.
+	var nilNotFound *NotFoundError
+	var err error = nilNotFound
+
+	w := httptest.NewRecorder()
+	status := WriteJSON(w, err)
+
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", status, http.StatusInternalServerError)
+	}
+
+	var resp HTTPErrorResponse
+	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %q)", decErr, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeInternal {
+		t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+	}
+}
+
 func TestWriteHTTPErrorLogsRenderFailureOnUnencodableDetail(t *testing.T) {
 	// The client-visible response falls back to a generic INTERNAL_ERROR
 	// (TestWriteJSONFallsBackOnUnencodableDetail), but that alone gives no
