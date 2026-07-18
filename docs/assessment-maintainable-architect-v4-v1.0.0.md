@@ -1,8 +1,9 @@
 # Maintainable Architect Assessment — v4
 **Project:** svcerr (github.com/n-ae/svcerr)
 **Version reviewed:** v1.0.0 (tag @ `aa133f0`) + zerologadapter/v1.0.0 (`main` @ `6abc6e4`, HEAD)
-**Date:** 2026-07-17
+**Date:** 2026-07-17 (closure addendum 2026-07-18)
 **Reviewer:** maintainable-architect-v4
+**Status:** All findings closed in v1.0.1 - see the addendum at the end
 **Prior assessment (this series):** [docs/assessment-maintainable-architect-v4-v1.0.0-rc.md](assessment-maintainable-architect-v4-v1.0.0-rc.md) (v1.0.0 candidate, 2026-07-17)
 **Cross-review inputs:** [docs/direct-repository-assessment-v1.0.0-2026-07-17.md](direct-repository-assessment-v1.0.0-2026-07-17.md) (Codex, direct); an external review of the tagged release supplied by the maintainer (Go 1.23.2 environment)
 
@@ -159,11 +160,14 @@ existing v1 signatures.
 1. **L1** — fallback resolves status *and* headers from a full
    `ErrCodeInternal` reclassification via `s.status`; composition tests
    for renderer-override and registry-override, JSON and problem.
+   *Closed in v1.0.1.*
 2. **L2** — recover marshaler panics into `RenderErr` + fallback body
    (the `safeLog` precedent decides the policy question).
+   *Closed in v1.0.1.*
 3. **L3** — `hijacked` log field; recovery-section ownership note;
-   panic-after-hijack regression test.
+   panic-after-hijack regression test. *Closed in v1.0.1.*
 4. **D1 + D2** — four one-line documentation corrections.
+   *Closed in v1.0.1.*
 
 All non-breaking; nothing here warrants expediting a release on its own.
 
@@ -202,3 +206,43 @@ uncounted. A release whose worst post-tag findings are a
 two-precondition status mismatch and a panic policy question is in
 excellent shape — the v1.0.1 list above closes every open item this
 series knows about.
+
+---
+
+## Closure addendum — v1.0.1 (2026-07-18)
+
+All four priority items shipped in commit `f5667c6`, tagged `v1.0.1`
+(annotated tag message is the changelog, per repository practice). CI
+green on all four matrix lanes including the Go 1.21 Linux floor; both
+modules held 100.0% statement coverage; `v1.0.1` verified resolvable
+through proxy.golang.org.
+
+Dispositions, including where implementation went beyond the list:
+
+- **L1 closed.** The fallback is a complete reclassification: status
+  from `s.status(ErrCodeInternal)` and the classification node dropped
+  (`node = nil`), so `finalizeErrorResponse` lost its `fallback`
+  parameter and no per-error header survives. The WWW-Authenticate
+  nuance this assessment flagged is pinned by a dedicated test: with
+  internal mapped to 401, a fallback carries the *default* challenge,
+  never the original error's own.
+- **L2 closed** in the recommended direction: `safeJSONMarshal` recovers
+  caller-marshaler panics into `RenderErr` + the standard fallback,
+  with the `safeLog` precedent cited in its doc comment.
+- **L3 closed**, going one step further than recommended: the hijacked
+  panic record gets its own message variant and `hijacked=true`, and
+  drops `http_status` as well as `response_committed_status` (both
+  zeros read as data). Connection ownership is documented in
+  `commitOnHijack` and the README (`defer conn.Close()` pattern), and
+  regression tests pin the log shape and that recovery leaves an
+  unclosed conn alone.
+- **D1 + D2 closed**, plus three same-class items found while closing:
+  the by-reference caveat also added to the README identity paragraph,
+  `Renderer.Middleware`'s "replacement 500" doc updated for the L1 fix,
+  and `zerologadapter`'s `Log` signature migrated to
+  `map[string]any` (type-identical; sits unreleased until the adapter
+  next tags for a substantive reason).
+
+The carried constructor narrowing (rc L1) remains open by design -
+additive v1.x constructors only if real consumers surface the need.
+Nothing else from this assessment is outstanding.
