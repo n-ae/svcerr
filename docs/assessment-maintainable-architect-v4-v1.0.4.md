@@ -197,7 +197,10 @@ and idiomatic custom errors are pointer-backed.
 
 ## Addendum (2026-07-19) — L1 closed
 
-L1 is fixed at commit `1e8c547`, on `main`, not yet tagged as a release.
+L1 is fixed at commit `1e8c547`, released as
+[v1.0.5](https://github.com/n-ae/svcerr/releases/tag/v1.0.5); the adapter's
+`svcerr` requirement was bumped accordingly in
+[zerologadapter/v1.0.3](https://github.com/n-ae/svcerr/releases/tag/zerologadapter/v1.0.3).
 `isNilValue` (`errors.go:1109`) now switches over `Chan`, `Func`,
 `Interface`, `Map`, `Pointer`, and `Slice`, returning `IsNil()` for each
 instead of checking only `reflect.Pointer`; the doc comment's claim that no
