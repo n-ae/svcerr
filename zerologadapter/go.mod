@@ -3,7 +3,7 @@ module github.com/n-ae/svcerr/zerologadapter
 go 1.25.0
 
 require (
-	github.com/n-ae/svcerr v1.0.4
+	github.com/n-ae/svcerr v1.0.5
 	github.com/rs/zerolog v1.35.1
 )
 
