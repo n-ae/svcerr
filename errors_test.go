@@ -677,10 +677,6 @@ func TestGetErrorCodeWithTypedNilCoder(t *testing.T) {
 	var nilCoder *minimalCodedError
 	var err error = nilCoder
 
-	if err == nil {
-		t.Fatal("sanity check failed: a typed nil assigned to error should compare != nil")
-	}
-
 	if got := GetErrorCode(err); got != ErrCodeInternal {
 		t.Errorf("GetErrorCode() = %v, want %v (a typed-nil Coder must classify as internal, not dereference)", got, ErrCodeInternal)
 	}
