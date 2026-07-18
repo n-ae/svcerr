@@ -25,8 +25,8 @@ the *original application error* regardless of whether rendering it
 later panicked: `stack_trace` comes from `GetStackTrace(err)`
 (`logging.go:25-27`), captured at that error's own construction site
 (e.g. wherever `NewValidationError` was called), not from the
-marshaler's panic site. `logError` (`logging.go:79-93`) separately adds
-`response_render_error` with the panic's text (`logging.go:82`), with no
+marshaler's panic site. `logError` (`logging.go:79-100`) separately adds
+`response_render_error` with the panic's text (`logging.go:89`), with no
 stack of its own alongside it.
 
 The v1.0.2 review (`assessment-maintainable-architect-v4-v1.0.2.md`,

@@ -38,7 +38,7 @@ surface until a real caller needs it.
 Keep `Logger.Log` context-free. Do not add a `ContextLogger` interface,
 `Renderer.JSONContext`, or any other context-aware overload speculatively.
 
-This package's own logging call sites (`safeLog` in `logging.go:116`,
+This package's own logging call sites (`safeLog` in `logging.go:123`,
 called from `logError` and `RecoveryMiddleware`) have no `context.Context`
 available to forward in the first place unless it's threaded through
 every public `Write*` function's signature - a breaking change to the
