@@ -118,7 +118,10 @@ const (
 // ErrorCode - the minimal capability GetErrorCode and HTTPStatusCode need.
 // A custom error type only needs this one method to participate in status
 // mapping; unlike ErrorWithCode, it doesn't also require Unwrap or
-// StackTrace.
+// StackTrace. Code should return a non-empty value: GetErrorCode
+// normalizes "" to ErrCodeInternal (the same normalization New and Wrap
+// apply to their code argument), so an empty Code() loses whatever
+// specific classification was intended rather than reaching the wire as-is.
 type Coder interface {
 	Code() ErrorCode
 }
@@ -152,7 +155,11 @@ type PublicDetailer interface {
 
 // ProblemTyper is implemented by any error that specifies its own RFC 9457
 // "type" URI for WriteHTTPProblem, in place of the default "about:blank".
-// BaseError implements it via SetProblemType/ProblemType.
+// BaseError implements it via SetProblemType/ProblemType. The bool is the
+// contract: return true only alongside a non-empty string, the same
+// guarantee BaseError's own implementation makes. WriteHTTPProblem uses
+// the string as-is whenever the bool is true, so a true with "" ships an
+// empty RFC 9457 "type" rather than falling back to "about:blank".
 type ProblemTyper interface {
 	ProblemType() (string, bool)
 }
@@ -160,7 +167,8 @@ type ProblemTyper interface {
 // ProblemInstancer is implemented by any error that specifies its own RFC
 // 9457 "instance" URI for WriteHTTPProblem - e.g. a request ID or trace
 // URL for this specific occurrence. BaseError implements it via
-// SetProblemInstance/ProblemInstance.
+// SetProblemInstance/ProblemInstance. As with ProblemTyper, return true
+// only alongside a non-empty string.
 type ProblemInstancer interface {
 	ProblemInstance() (string, bool)
 }
@@ -170,7 +178,10 @@ type ProblemInstancer interface {
 // http.StatusText(status) - useful alongside a custom SetProblemType,
 // since RFC 9457 defines title as a short, occurrence-invariant summary
 // of that specific problem type, not of the HTTP status in general.
-// BaseError implements it via SetProblemTitle/ProblemTitle.
+// BaseError implements it via SetProblemTitle/ProblemTitle. As with
+// ProblemTyper, return true only alongside a non-empty string: a true
+// with "" ships a blank RFC 9457 title rather than falling back to the
+// computed default.
 type ProblemTitler interface {
 	ProblemTitle() (string, bool)
 }
@@ -184,7 +195,10 @@ type ProblemTitler interface {
 // doesn't, from the application-wide default configured via
 // SetDefaultAuthenticateChallenge (an error-specific challenge always
 // wins over that default). BaseError implements it via
-// SetAuthenticateChallenge/AuthenticateChallenge.
+// SetAuthenticateChallenge/AuthenticateChallenge. As with ProblemTyper,
+// return true only alongside a non-empty string: a true with "" ships an
+// empty WWW-Authenticate header value instead of falling back to the
+// configured default.
 type Authenticator interface {
 	AuthenticateChallenge() (string, bool)
 }
