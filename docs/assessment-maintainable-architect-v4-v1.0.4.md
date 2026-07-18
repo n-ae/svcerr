@@ -66,8 +66,8 @@ severity call is adopted; Source A's medium rating is not.
 |---|---:|---|
 | Critical / high | 0 | — |
 | Medium | 0 | 0018's M1 (`GetStackTrace`/`RecaptureStackTrace`/`logError` typed-nil handling) is confirmed closed. |
-| Low | 1 | L1 (carried over from 0018, unchanged): `isNilValue` recognizes only `reflect.Pointer`; a nil-backed `Coder`/`StackTracer` of slice/map/func/chan/interface kind still panics — but only before response commitment, not after. |
-| Note, not a finding | 1 | The `isNilValue` doc comment's claim that "no error type in practice uses" map/chan/func kinds is now demonstrably false (this review's own slice repro disproves it for slice, and the same reflect gap applies to map/chan/func/interface); worth a one-line comment correction regardless of whether the code changes. |
+| Low | 0 | L1 (carried over from 0018) is closed as of commit `1e8c547` — see [Addendum](#addendum-2026-07-19--l1-closed) below. Open at the time this assessment was first written; the table above and the body text that follows describe that original, point-in-time finding. |
+| Note, not a finding | 1 | The `isNilValue` doc comment's claim that "no error type in practice uses" map/chan/func kinds is now demonstrably false (this review's own slice repro disproves it for slice, and the same reflect gap applies to map/chan/func/interface); worth a one-line comment correction regardless of whether the code changes. Corrected as part of the L1 closure below. |
 | Confirmed unchanged (carried over) | 2 | Context-free `Logger` (ADR 0001) and marshal-panic stack provenance (ADR 0002) — both re-confirmed present and correctly dispositioned as declined-by-design. |
 
 ## Reconciling Source A and Source B
@@ -176,13 +176,14 @@ At tag `v1.0.4` / HEAD `fe5a7af`, Go 1.26.5, darwin/arm64:
 
 ## v1.0.5 priorities
 
-1. **L1 (carried over from 0018, unchanged priority: low)** — extend
+1. ~~**L1 (carried over from 0018, unchanged priority: low)** — extend
    `isNilValue` (`errors.go:1109`) to switch over `Chan`, `Func`,
    `Interface`, `Map`, `Pointer`, `Slice` kinds, returning `IsNil()` for
    each; correct the doc comment's now-falsified claim that no error type
    in practice uses the non-pointer kinds. Add regression coverage for a
    nil-valued named slice or map `Coder`-only type through `GetErrorCode`,
-   and the equivalent for `StackTracer` through `GetStackTrace`.
+   and the equivalent for `StackTracer` through `GetStackTrace`.~~ **Done
+   — see [Addendum](#addendum-2026-07-19--l1-closed).**
 2. **Documentation-only** — the assessment index (`docs/assessments/README.md`)
    should keep its "M1 closed in v1.0.4" wording as-is; it is correct.
    Any future shorthand referring to "the isNilValue gap" should cite it as
@@ -193,3 +194,34 @@ At tag `v1.0.4` / HEAD `fe5a7af`, Go 1.26.5, darwin/arm64:
 The L1 fix remains non-breaking: it only narrows what a panic is allowed to
 do, in a code path most consumers never exercise since svcerr's own types
 and idiomatic custom errors are pointer-backed.
+
+## Addendum (2026-07-19) — L1 closed
+
+L1 is fixed at commit `1e8c547`, on `main`, not yet tagged as a release.
+`isNilValue` (`errors.go:1109`) now switches over `Chan`, `Func`,
+`Interface`, `Map`, `Pointer`, and `Slice`, returning `IsNil()` for each
+instead of checking only `reflect.Pointer`; the doc comment's claim that no
+error type in practice uses the non-pointer kinds is removed.
+
+Regression coverage added in `errors_test.go`:
+
+- `TestGetErrorCodeWithNilNonPointerCoder` — a nil-valued `nilSliceCoder`
+  (named `[]string` implementing `Coder`) classifies as `ErrCodeInternal`
+  instead of panicking on `Code()`'s slice index.
+- `TestGetStackTraceWithNilNonPointerCoder` — the `StackTracer` analogue,
+  via `nilSliceStackTracer`.
+- `TestGetErrorCodeWithNonNilCapableValueCoder` — a `structCoder` value
+  (a kind reflect can never report as nil) still classifies normally,
+  covering `isNilValue`'s `default` branch so a non-nil-capable value type
+  isn't mistaken for nil.
+
+Verified: `go test -count=1 -cover ./...` (100.0% coverage, unchanged),
+`go test -race -count=1 ./...`, `go vet ./...`, `gofmt -l .`, and
+`GOWORK=off go mod tidy -diff` — all clean.
+
+This closes 0019's only open finding. No new finding was introduced by the
+fix. The "Note, not a finding" row above (the falsified doc comment) is
+also resolved by this same commit. The rest of this document — including
+the Source A/Source B reconciliation and the claim-by-claim verification —
+describes the state of v1.0.4 at the time of the original review and is
+left unchanged as a point-in-time record.
