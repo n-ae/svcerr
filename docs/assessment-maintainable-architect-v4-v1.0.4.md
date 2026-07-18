@@ -222,6 +222,20 @@ Verified: `go test -count=1 -cover ./...` (100.0% coverage, unchanged),
 `go test -race -count=1 ./...`, `go vet ./...`, `gofmt -l .`, and
 `GOWORK=off go mod tidy -diff` — all clean.
 
+## Follow-up (2026-07-19) — v1.0.6 adds further regression coverage
+
+L1's fix itself did not move: it remains the `isNilValue` change released
+in v1.0.5 above. [v1.0.6](https://github.com/n-ae/svcerr/releases/tag/v1.0.6)
+is a separate, test-only release with no source or behavior change - it
+adds dedicated nil map, chan, and func `Coder` regression tests
+(`TestGetErrorCodeWithNilMapCoder`, `TestGetErrorCodeWithNilChanCoder`,
+`TestGetErrorCodeWithNilFuncCoder`) alongside the slice case the v1.0.5
+addendum above already covered, and documents `isNilValue`'s
+`reflect.Interface` switch arm as defensive/unreachable through this
+package's actual call sites rather than a coverage gap. The adapter's
+`svcerr` requirement was bumped accordingly in
+[zerologadapter/v1.0.4](https://github.com/n-ae/svcerr/releases/tag/zerologadapter/v1.0.4).
+
 This closes 0019's only open finding. No new finding was introduced by the
 fix. The "Note, not a finding" row above (the falsified doc comment) is
 also resolved by this same commit. The rest of this document — including
