@@ -1198,6 +1198,195 @@ func TestWriteProblemFallsBackOnUnencodableDetail(t *testing.T) {
 	}
 }
 
+func TestMarshalFallbackHonorsConfiguredInternalStatus(t *testing.T) {
+	// The marshal-failure fallback is a reclassification to
+	// ErrCodeInternal, so it must derive its status from the active
+	// mapping for that code - a Renderer's StatusCodes override or the
+	// RegisterStatusCode registry - exactly as a directly-rendered
+	// internal error would, not from a hard-coded 500 (assessment
+	// v1.0.0 L1: hard-coding defeated an application's deliberate
+	// 503/retry semantics on exactly the responses that say
+	// INTERNAL_ERROR).
+	unencodable := func() *BaseError {
+		e := New(ErrCodeInvalidInput, "invalid")
+		e.SetPublicDetail("bad", make(chan int))
+		return e
+	}
+
+	t.Run("Renderer StatusCodes override", func(t *testing.T) {
+		r, rendererErr := NewRenderer(RendererConfig{
+			StatusCodes: map[ErrorCode]int{ErrCodeInternal: http.StatusServiceUnavailable},
+		})
+		if rendererErr != nil {
+			t.Fatalf("NewRenderer() error = %v", rendererErr)
+		}
+
+		t.Run("JSON", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			got := r.JSON(w, unencodable())
+			if got.RenderErr == nil {
+				t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+			}
+			if got.Status != http.StatusServiceUnavailable || w.Code != http.StatusServiceUnavailable {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (this renderer's mapping for ErrCodeInternal)",
+					got.Status, w.Code, http.StatusServiceUnavailable, http.StatusServiceUnavailable)
+			}
+			var resp HTTPErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("body is not valid JSON: %v (body: %q)", err, w.Body.String())
+			}
+			if resp.Error.Code != ErrCodeInternal {
+				t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+			}
+		})
+
+		t.Run("Problem", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			got := r.Problem(w, unencodable())
+			if got.RenderErr == nil {
+				t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+			}
+			if got.Status != http.StatusServiceUnavailable || w.Code != http.StatusServiceUnavailable {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (this renderer's mapping for ErrCodeInternal)",
+					got.Status, w.Code, http.StatusServiceUnavailable, http.StatusServiceUnavailable)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("body is not valid JSON: %v (body: %q)", err, w.Body.String())
+			}
+			if resp["status"] != float64(http.StatusServiceUnavailable) {
+				t.Errorf(`resp["status"] = %v, want %d - the body's status member must agree with the mapped status on the wire`, resp["status"], http.StatusServiceUnavailable)
+			}
+			if resp["title"] != http.StatusText(http.StatusServiceUnavailable) {
+				t.Errorf(`resp["title"] = %v, want %q`, resp["title"], http.StatusText(http.StatusServiceUnavailable))
+			}
+		})
+	})
+
+	t.Run("RegisterStatusCode override", func(t *testing.T) {
+		t.Cleanup(func() {
+			delete(customStatusCode, ErrCodeInternal)
+		})
+		if err := RegisterStatusCode(ErrCodeInternal, http.StatusServiceUnavailable); err != nil {
+			t.Fatalf("RegisterStatusCode(ErrCodeInternal, %d) error = %v", http.StatusServiceUnavailable, err)
+		}
+
+		t.Run("JSON", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			got := WriteJSONResult(w, unencodable())
+			if got.RenderErr == nil {
+				t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+			}
+			if got.Status != http.StatusServiceUnavailable || w.Code != http.StatusServiceUnavailable {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (the registry's mapping for ErrCodeInternal)",
+					got.Status, w.Code, http.StatusServiceUnavailable, http.StatusServiceUnavailable)
+			}
+		})
+
+		t.Run("Problem", func(t *testing.T) {
+			w := httptest.NewRecorder()
+			got := WriteProblemResult(w, unencodable())
+			if got.RenderErr == nil {
+				t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+			}
+			if got.Status != http.StatusServiceUnavailable || w.Code != http.StatusServiceUnavailable {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (the registry's mapping for ErrCodeInternal)",
+					got.Status, w.Code, http.StatusServiceUnavailable, http.StatusServiceUnavailable)
+			}
+		})
+	})
+}
+
+func TestMarshalFallbackDropsClassificationHeaders(t *testing.T) {
+	// The fallback reclassifies to ErrCodeInternal, so headers derived
+	// from the original error's classification must not ride along on a
+	// response that no longer represents it.
+	t.Run("Retry-After from a rate limit error does not survive", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		e := NewRateLimitError("api", 100, 60)
+		e.SetPublicDetail("bad", make(chan int))
+
+		got := WriteJSONResult(w, e)
+		if got.RenderErr == nil {
+			t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+		}
+		if h := w.Header().Get("Retry-After"); h != "" {
+			t.Errorf("Retry-After = %q, want empty - the fallback no longer represents the rate-limit classification", h)
+		}
+	})
+
+	t.Run("an error-specific challenge does not survive when the fallback maps to 401, the default does", func(t *testing.T) {
+		// 401 is a legal (if unusual) override for ErrCodeInternal, so the
+		// pre-fix invariant "a fallback's 500 always fails the 401 gate"
+		// no longer holds by construction. What must hold instead: the
+		// fallback behaves like a bare internal error rendered under this
+		// mapping - the default challenge applies, the original error's
+		// own challenge (part of the classification the fallback dropped)
+		// does not.
+		const defaultChallenge = `Bearer realm="api"`
+		r, rendererErr := NewRenderer(RendererConfig{
+			StatusCodes:                  map[ErrorCode]int{ErrCodeInternal: http.StatusUnauthorized},
+			DefaultAuthenticateChallenge: defaultChallenge,
+		})
+		if rendererErr != nil {
+			t.Fatalf("NewRenderer() error = %v", rendererErr)
+		}
+
+		e := NewAuthenticationError("token_expired", "session expired")
+		e.SetAuthenticateChallenge(`Bearer error="invalid_token"`)
+		e.SetPublicDetail("bad", make(chan int))
+
+		w := httptest.NewRecorder()
+		got := r.JSON(w, e)
+		if got.RenderErr == nil {
+			t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+		}
+		if got.Status != http.StatusUnauthorized {
+			t.Fatalf("Status = %d, want %d (this renderer maps ErrCodeInternal to 401)", got.Status, http.StatusUnauthorized)
+		}
+		if h := w.Header().Get("WWW-Authenticate"); h != defaultChallenge {
+			t.Errorf("WWW-Authenticate = %q, want the default %q - the original error's own challenge belongs to the dropped classification", h, defaultChallenge)
+		}
+	})
+}
+
+// panickingMarshaler stands in for a caller-supplied json.Marshaler that
+// panics: encoding/json recovers only its own internal sentinel panics
+// and re-panics everything else, so without safeJSONMarshal this would
+// escape the response writer entirely.
+type panickingMarshaler struct{}
+
+func (panickingMarshaler) MarshalJSON() ([]byte, error) { panic("marshal boom") }
+
+func TestWriteContainsPanickingMarshaler(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(http.ResponseWriter, error) WriteResult
+	}{
+		{"WriteJSONResult", WriteJSONResult},
+		{"WriteProblemResult", WriteProblemResult},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			e := New(ErrCodeInvalidInput, "invalid")
+			e.SetPublicDetail("bad", panickingMarshaler{})
+
+			got := tc.write(w, e) // must not panic
+
+			if got.RenderErr == nil || !strings.Contains(got.RenderErr.Error(), "JSON marshaler panicked") {
+				t.Errorf("RenderErr = %v, want the recovered marshaler panic", got.RenderErr)
+			}
+			if got.Status != http.StatusInternalServerError || w.Code != http.StatusInternalServerError {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (the standard fallback)", got.Status, w.Code, http.StatusInternalServerError, http.StatusInternalServerError)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("body is not valid JSON: %v (body: %q)", err, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 	err := NewNotFoundError("league", "1")
 
@@ -1510,6 +1699,28 @@ func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h.hijacked = true
 	server, _ := net.Pipe()
 	return server, bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)), nil
+}
+
+// closeRecordingConn records whether anything called Close, for pinning
+// hijacked-connection ownership: recovery must leave the conn alone.
+type closeRecordingConn struct {
+	net.Conn
+	closed bool
+}
+
+func (c *closeRecordingConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+// connHijackRecorder is hijackableRecorder with an observable conn.
+type connHijackRecorder struct {
+	*httptest.ResponseRecorder
+	conn *closeRecordingConn
+}
+
+func (h *connHijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
 }
 
 func TestTrackingResponseWriterFlush(t *testing.T) {
@@ -2479,8 +2690,45 @@ func TestRecoveryMiddleware(t *testing.T) {
 		if len(logger.calls) != 1 {
 			t.Fatalf("logger.calls = %d, want 1, got %+v", len(logger.calls), logger.calls)
 		}
-		if logger.calls[0].msg != "Panic recovered in HTTP handler after response was already committed" {
-			t.Errorf("log msg = %q, want the committed-response variant", logger.calls[0].msg)
+		if logger.calls[0].msg != "Panic recovered in HTTP handler after connection was hijacked" {
+			t.Errorf("log msg = %q, want the hijacked variant", logger.calls[0].msg)
+		}
+		fields := logger.calls[0].fields
+		if fields["hijacked"] != true {
+			t.Errorf(`fields["hijacked"] = %v, want true`, fields["hijacked"])
+		}
+		if v, ok := fields["response_committed_status"]; ok {
+			t.Errorf(`fields["response_committed_status"] = %v, want the key entirely absent - no HTTP status was committed, and a 0 here reads as data during an incident`, v)
+		}
+		if v, ok := fields["http_status"]; ok {
+			t.Errorf(`fields["http_status"] = %v, want the key entirely absent for the same reason - no HTTP status applies to a hijacked response`, v)
+		}
+	})
+
+	t.Run("a hijacked connection the handler never closed is left alone by recovery", func(t *testing.T) {
+		// Ownership pin: after Hijack the handler owns the connection
+		// (net/http's contract) and may already have handed it to another
+		// goroutine, so recovery must neither write to it (asserted above)
+		// nor close it - a close here would be a use-after-transfer
+		// hazard. The README documents the defer conn.Close() pattern this
+		// leaves to the handler.
+		logger := &recordingLogger{}
+		conn := &closeRecordingConn{}
+		underlying := &connHijackRecorder{ResponseRecorder: httptest.NewRecorder(), conn: conn}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, _, err := w.(http.Hijacker).Hijack(); err != nil {
+				t.Fatalf("Hijack() error = %v", err)
+			}
+			panic("boom after hijack, no close")
+		}))
+
+		expectAbortHandler(t, handler, underlying, httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if conn.closed {
+			t.Error("recovery closed the hijacked connection, want it left alone - the handler (or whoever it transferred the conn to) owns it")
+		}
+		if len(logger.calls) != 1 || logger.calls[0].fields["hijacked"] != true {
+			t.Fatalf(`logger.calls = %+v, want exactly one hijacked-variant record`, logger.calls)
 		}
 	})
 

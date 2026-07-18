@@ -20,7 +20,7 @@ func New(l zerolog.Logger) Adapter {
 }
 
 // Log implements svcerr.Logger.
-func (a Adapter) Log(level svcerr.Level, err error, fields map[string]interface{}, msg string) {
+func (a Adapter) Log(level svcerr.Level, err error, fields map[string]any, msg string) {
 	var event *zerolog.Event
 	switch level {
 	case svcerr.LevelError:

@@ -78,8 +78,22 @@ func recoveryMiddleware(logger Logger, settings func() renderSettings) func(http
 					fields["panic"] = rec
 					fields["method"] = r.Method
 					fields["path"] = r.URL.Path
-					fields["response_committed_status"] = tw.status
-					safeLog(logger, LevelError, err, fields, "Panic recovered in HTTP handler after response was already committed")
+					msg := "Panic recovered in HTTP handler after response was already committed"
+					if tw.hijacked {
+						// Commitment came from a successful Hijack, not a
+						// written status - tw.status is 0, and reporting a
+						// zero as response_committed_status or http_status
+						// would look like data during an incident. Say what
+						// happened instead: no HTTP status applies to a
+						// hijacked response. The hijacked connection stays
+						// untouched: the handler owns it (see commitOnHijack).
+						fields["hijacked"] = true
+						delete(fields, "http_status")
+						msg = "Panic recovered in HTTP handler after connection was hijacked"
+					} else {
+						fields["response_committed_status"] = tw.status
+					}
+					safeLog(logger, LevelError, err, fields, msg)
 					panic(http.ErrAbortHandler)
 				}
 

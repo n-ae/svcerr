@@ -2,6 +2,7 @@ package svcerr
 
 import (
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"net/http"
@@ -30,8 +31,9 @@ type ErrorDetail struct {
 // this type existed.
 type WriteResult struct {
 	// Status is the HTTP status code svcerr selected and passed to
-	// w.WriteHeader - the fallback 500 on a marshal failure, not
-	// necessarily err's own classification. It's what svcerr chose to
+	// w.WriteHeader - on a marshal failure, the active mapping's status
+	// for ErrCodeInternal (500 by default), not necessarily err's own
+	// classification. It's what svcerr chose to
 	// send, not a transport confirmation that the client received exactly
 	// that status: a custom or third-party ResponseWriter could ignore it,
 	// have already committed a different status earlier, transform it, or
@@ -39,8 +41,11 @@ type WriteResult struct {
 	Status int
 	// RenderErr is the marshal error when the real body couldn't be
 	// JSON-encoded and a generic fallback was substituted instead (nil
-	// otherwise). Always nil from WriteHTMLResult, whose body is plain
-	// string concatenation and can't fail to encode.
+	// otherwise) - including a caller-supplied json.Marshaler that
+	// panicked, which is recovered and reported here as an error rather
+	// than allowed to escape the response writer (see safeJSONMarshal).
+	// Always nil from WriteHTMLResult, whose body is plain string
+	// concatenation and can't fail to encode.
 	RenderErr error
 	// WriteErr is whatever the final w.Write returned (nil on a full
 	// write) - a client disconnect, an expired deadline, or any other
@@ -112,6 +117,27 @@ func checkedWrite(w http.ResponseWriter, body []byte) (int, error) {
 	return n, err
 }
 
+// safeJSONMarshal wraps json.Marshal, additionally converting a panic
+// from a caller-supplied json.Marshaler into an error. encoding/json
+// recovers its own internal sentinel panics but deliberately re-panics
+// any other value, including one raised inside a custom MarshalJSON -
+// so a diagnostic value attached via SetPublicDetail could otherwise
+// take down the very writer that exists to report failures. The same
+// policy already governs the package's other caller-supplied
+// collaborator: safeLog contains a panicking Logger for the same
+// reason. The recovered panic becomes a RenderErr and engages the
+// standard marshal-failure fallback, degrading exactly like any other
+// unencodable value instead of escaping the response path.
+func safeJSONMarshal(v any) (body []byte, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			body = nil
+			err = fmt.Errorf("svcerr: JSON marshaler panicked: %v", rec)
+		}
+	}()
+	return json.Marshal(v)
+}
+
 // renderSettings bundles the configuration one response rendering uses:
 // how a code maps to a status, the default WWW-Authenticate challenge,
 // and the header policy. The package-level writers build it fresh per
@@ -152,18 +178,19 @@ func defaultRecoverySettings() renderSettings {
 // shares once the status and body bytes are decided: reset the
 // representation headers per policy, restore the classification-specific
 // headers, write the status, and deliver the body with short-write
-// detection. Retry-After is skipped when the body is a marshal-failure
-// fallback, since that response no longer represents err's own
-// classification; the WWW-Authenticate gate needs no such guard because
-// a fallback's 500 status already fails its 401 check. This sequence
-// exists once, here, because it demonstrably drifts when copied per
-// format - the v0.6.4 HTML Retry-After omission was exactly such a copy
-// missing one step.
-func finalizeErrorResponse(w http.ResponseWriter, contentType string, s renderSettings, statusCode int, node coderError, fallback bool, body []byte) (bytesWritten int, writeErr error) {
+// detection. A marshal-failure fallback passes node as nil - the
+// response is a complete reclassification to ErrCodeInternal and no
+// longer represents err's own classification, so no per-error header
+// (Retry-After, an error-specific WWW-Authenticate challenge) may
+// survive from it; both header helpers treat a nil node as carrying
+// nothing. The default challenge still applies on a fallback whose
+// mapped status is 401, exactly as it would for a bare internal error
+// rendered under that mapping. This sequence exists once, here, because
+// it demonstrably drifts when copied per format - the v0.6.4 HTML
+// Retry-After omission was exactly such a copy missing one step.
+func finalizeErrorResponse(w http.ResponseWriter, contentType string, s renderSettings, statusCode int, node coderError, body []byte) (bytesWritten int, writeErr error) {
 	prepareErrorHeaders(w.Header(), contentType, s.policy)
-	if !fallback {
-		retryAfterHeader(w.Header(), node)
-	}
+	retryAfterHeader(w.Header(), node)
 	setAuthenticateChallenge(w.Header(), statusCode, node, s.defaultChallenge)
 	w.WriteHeader(statusCode)
 	return checkedWrite(w, body)
@@ -195,14 +222,21 @@ func writeJSONErrorBody(w http.ResponseWriter, err error, s renderSettings) (sta
 	// SetPublicDetail, ...) doesn't leave a status already written and an
 	// empty or truncated body - the caller would see a "successful" write
 	// with no way to know the document is broken.
-	body, marshalErr := json.Marshal(errResp)
+	body, marshalErr := safeJSONMarshal(errResp)
 	if marshalErr != nil {
-		statusCode = http.StatusInternalServerError
+		// Complete reclassification to ErrCodeInternal: the status comes
+		// from the active mapping for that code (a Renderer's StatusCodes
+		// override or the RegisterStatusCode registry, not a hard-coded
+		// 500), and node is dropped so no header derived from err's own,
+		// no-longer-represented classification survives - see
+		// finalizeErrorResponse.
+		statusCode = s.status(ErrCodeInternal)
 		body = fallbackErrorBody(ErrCodeInternal)
 		renderErr = marshalErr
+		node = nil
 	}
 
-	bytesWritten, writeErr = finalizeErrorResponse(w, "application/json", s, statusCode, node, marshalErr != nil, body)
+	bytesWritten, writeErr = finalizeErrorResponse(w, "application/json", s, statusCode, node, body)
 
 	return statusCode, bytesWritten, renderErr, writeErr
 }
@@ -265,8 +299,8 @@ func writeHTMLErrorBody(w http.ResponseWriter, err error, s renderSettings) (sta
 		`</div>`
 
 	// String concatenation can't fail to render, so HTML never has a
-	// fallback body - Retry-After always applies.
-	bytesWritten, writeErr = finalizeErrorResponse(w, "text/html; charset=utf-8", s, statusCode, node, false, []byte(body))
+	// fallback body - node is always err's own classification here.
+	bytesWritten, writeErr = finalizeErrorResponse(w, "text/html; charset=utf-8", s, statusCode, node, []byte(body))
 
 	return statusCode, bytesWritten, writeErr
 }
@@ -403,14 +437,17 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, s renderSettings) (s
 		Extensions: extractErrorDetails(err),
 	}
 
-	body, marshalErr := json.Marshal(problem)
+	body, marshalErr := safeJSONMarshal(problem)
 	if marshalErr != nil {
-		statusCode = http.StatusInternalServerError
+		// Complete reclassification to ErrCodeInternal, exactly as in
+		// writeJSONErrorBody: status from the active mapping, node dropped.
+		statusCode = s.status(ErrCodeInternal)
 		body = fallbackProblemBody(statusCode)
 		renderErr = marshalErr
+		node = nil
 	}
 
-	bytesWritten, writeErr = finalizeErrorResponse(w, "application/problem+json", s, statusCode, node, marshalErr != nil, body)
+	bytesWritten, writeErr = finalizeErrorResponse(w, "application/problem+json", s, statusCode, node, body)
 
 	return statusCode, bytesWritten, renderErr, writeErr
 }

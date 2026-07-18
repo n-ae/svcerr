@@ -23,6 +23,12 @@ type trackingResponseWriter struct {
 	http.ResponseWriter
 	wroteHeader bool
 	status      int
+	// hijacked records that commitment came from a successful Hijack
+	// rather than a written status - status is then meaningless (no HTTP
+	// response was or will be written by this package), and
+	// RecoveryMiddleware's committed-panic log says "hijacked" instead of
+	// reporting a status of 0 that looks like data.
+	hijacked bool
 }
 
 func (w *trackingResponseWriter) WriteHeader(status int) {
@@ -136,16 +142,21 @@ func commitOnFlushError(tw *trackingResponseWriter, fe flushErrorer) error {
 }
 
 // commitOnHijack hijacks through hj, marking tw committed on success -
-// shared by hijackTracker and flushHijackTracker, the only two variants
-// that ever call it (both are only constructed when the underlying writer
-// actually supports http.Hijacker). A successful hijack hands the raw
-// connection to the caller, so it's treated as committing the response -
-// RecoveryMiddleware must never attempt to write a JSON error body onto a
-// hijacked connection.
+// shared by every *hijackTracker variant, which are only constructed
+// when the underlying writer actually supports http.Hijacker. A
+// successful hijack hands the raw connection to the caller, so it's
+// treated as committing the response - RecoveryMiddleware must never
+// attempt to write a JSON error body onto a hijacked connection. The
+// connection itself is deliberately not retained: after Hijack the
+// caller owns it (net/http's documented contract), and handlers
+// legitimately hand it to another goroutine before an unrelated panic,
+// so closing it from panic recovery would be a use-after-transfer
+// hazard. Recovery only records the fact of the hijack for its log.
 func commitOnHijack(tw *trackingResponseWriter, hj http.Hijacker) (net.Conn, *bufio.ReadWriter, error) {
 	conn, rw, err := hj.Hijack()
 	if err == nil {
 		tw.wroteHeader = true
+		tw.hijacked = true
 	}
 	return conn, rw, err
 }

@@ -43,6 +43,15 @@
 // writable fields; the migration is mechanical - x.Field becomes
 // x.Field(). See docs/v1-design-pass.md.)
 //
+// Identity fixation is by reference, not deep copy: a mutable object a
+// constructor is given (e.g. the map or slice passed as
+// NewValidationError's value) stays shared, so mutating it afterward is
+// visible through Value() and Context() - pass a snapshot if the
+// original will change. This never affects wire output or logs
+// (validation values are deliberately excluded from both); it is the
+// same shallow-ownership rule PublicDetails documents for detail
+// values.
+//
 // Errors are not safe for concurrent mutation. SetPublicMessage,
 // SetPublicDetail, RemovePublicDetail, SetProblemType, SetProblemInstance,
 // SetProblemTitle, SetAuthenticateChallenge, SetRetryAfter, and
@@ -526,7 +535,9 @@ func (e *ValidationError) Field() string { return e.field }
 
 // Value returns the offending input value, when the constructor was
 // given one - never rendered to clients (see extractErrorDetails), but
-// available to callers for their own handling.
+// available to callers for their own handling. The reference is fixed
+// at construction but not deep-copied: if the caller passed a mutable
+// object and mutates it later, Value (and Context) observe the change.
 func (e *ValidationError) Value() any { return e.value }
 
 // Context returns this error's identity as a fresh map - field and

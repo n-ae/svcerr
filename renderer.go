@@ -155,8 +155,8 @@ func (r *Renderer) Problem(w http.ResponseWriter, err error) WriteResult {
 
 // Middleware returns RecoveryMiddleware's behavior under this Renderer's
 // configuration and Logger: panic recovery with commit tracking, writing
-// the replacement 500 with this Renderer's status mapping, challenge
-// default, and RecoveryHeaderPolicy.
+// the replacement internal-error response with this Renderer's status
+// mapping, challenge default, and RecoveryHeaderPolicy.
 func (r *Renderer) Middleware() func(http.Handler) http.Handler {
 	return recoveryMiddleware(r.logger, r.recoverySettings)
 }

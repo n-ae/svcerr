@@ -154,9 +154,10 @@ func prepareErrorHeaders(h http.Header, contentType string, policy HeaderPolicy)
 // expose the same value to clients as a retry_after details member, so
 // the standard header is the strictly more useful spelling). Using the
 // classification node means an outer wrapper's code can't inherit a
-// wrapped error's header. Shared by all three response writers; skipped
-// on the marshal-failure fallback by the JSON/problem+json callers, since
-// that response no longer represents err's own classification.
+// wrapped error's header. Shared by all three response writers; a nil
+// node (the JSON/problem+json marshal-failure fallback, a full
+// reclassification to ErrCodeInternal - see finalizeErrorResponse)
+// carries no hint and sets nothing.
 //
 // The stored retry values are trusted here without re-clamping: since
 // v1 the fields are unexported and every entry point (the RateLimitError

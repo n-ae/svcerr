@@ -121,9 +121,13 @@ Identity is read through same-name methods (`nfErr.ResourceType()`,
 `vErr.Field()`, `rlErr.RetryAfter()`, ...) and is fixed at construction -
 every projection of an error (response details, headers, log fields,
 `Context()`) derives from that one canonical state, so they can never
-disagree. Presentation (public message, details, problem members,
-authentication challenges) is configured through the `Set*` methods
-before the error is returned.
+disagree. Fixation is by reference, not deep copy: a mutable object
+passed to a constructor (e.g. a validation error's value) stays shared,
+so mutating it afterward is visible through `Value()` and `Context()` -
+pass a snapshot if the original will change (this never affects wire
+output or logs; validation values are excluded from both). Presentation
+(public message, details, problem members, authentication challenges) is
+configured through the `Set*` methods before the error is returned.
 
 Recover panics in HTTP handlers and turn them into a proper error response:
 
@@ -146,6 +150,27 @@ handlers wrapped by the middleware, and a handler's own
 `http.ResponseController`) get a truthful answer instead of the wrapper
 always claiming both regardless of what's underneath. A successful hijack
 is itself treated as committing the response.
+
+**After a successful `Hijack`, the connection is yours** - per `net/http`,
+the server no longer manages it, and neither does this middleware:
+recovery will not write to it (correct) and will not close it either,
+because handlers legitimately hand the connection to another goroutine
+and a close from panic recovery would race that transfer. Take ownership
+immediately, before any code that might panic:
+
+```go
+conn, rw, err := w.(http.Hijacker).Hijack()
+if err != nil {
+	return
+}
+defer conn.Close()
+// only now do work that might panic
+```
+
+A panic after a hijack is still logged (with `hijacked=true` in the log
+fields - no HTTP status applies to a hijacked response) and re-panics
+with `http.ErrAbortHandler`, but a connection the handler never arranged
+to close stays open.
 
 Flushing, hijacking, and the error-reporting `FlushError() error` form
 (which `http.ResponseController` prefers) are the *only* optional
@@ -220,7 +245,7 @@ svcerr.SetRecoveryHeaderPolicy(svcerr.HeaderPolicy{ClearValidators: true})
 has a `New*`/`Wrap*` constructor, carries an `ErrorCode`, and supports
 stdlib `errors.Is`/`errors.As`/`errors.Unwrap` in the usual way. See the
 `ErrorCode` constants in [`errors.go`](errors.go) for the full list of
-codes and `HTTPStatusCode` in [`http.go`](http.go) for their HTTP status
+codes and `HTTPStatusCode` in [`status.go`](status.go) for their HTTP status
 mapping.
 
 For a code with no dedicated constructor (e.g. `ErrCodeDatabaseConnection`,
@@ -302,7 +327,7 @@ type PublicMessager interface {
 }
 
 type PublicDetailer interface {
-	PublicDetails() (add map[string]interface{}, remove map[string]struct{}) // extractErrorDetails overrides
+	PublicDetails() (add map[string]any, remove map[string]struct{}) // extractErrorDetails overrides
 }
 
 type ProblemTyper interface {
@@ -509,7 +534,7 @@ specific logging library:
 
 ```go
 type Logger interface {
-	Log(level Level, err error, fields map[string]interface{}, msg string)
+	Log(level Level, err error, fields map[string]any, msg string)
 }
 ```
 
