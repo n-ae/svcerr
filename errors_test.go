@@ -772,6 +772,76 @@ func TestGetStackTraceWithNilNonPointerCoder(t *testing.T) {
 	}
 }
 
+// nilMapCoder, nilChanCoder, and nilFuncCoder round out nilSliceCoder's
+// coverage of isNilValue's reflect.Kind switch with the other three
+// reachable nil-capable kinds. reflect.Interface is in the switch too, to
+// match reflect.Value.IsNil's documented kind set, but it cannot be
+// exercised through GetErrorCode/GetStackTrace/RecaptureStackTrace: every
+// call site converts an interface-typed local (Coder/StackTracer/
+// stackTraceSetter) to `any` before calling isNilValue, and Go always
+// flattens that conversion to the underlying concrete type - reflect.Kind()
+// is never Interface for a value obtained this way, only for values reached
+// through an unexported struct field accessed without Elem(). The
+// reflect.Interface arm is defensive/unreachable dead code for this
+// package's actual callers, not a gap a regression test can close.
+type nilMapCoder map[string]ErrorCode
+
+func (e nilMapCoder) Error() string { return "nil map coder" }
+func (e nilMapCoder) Code() ErrorCode {
+	e["code"] = ErrCodeInternal // panics: assignment to entry in nil map
+	return e["code"]
+}
+
+type nilChanCoder chan string
+
+func (e nilChanCoder) Error() string { return "nil chan coder" }
+func (e nilChanCoder) Code() ErrorCode {
+	close(e) // panics: close of nil channel
+	return ErrCodeInternal
+}
+
+type nilFuncCoder func() ErrorCode
+
+func (e nilFuncCoder) Error() string { return "nil func coder" }
+func (e nilFuncCoder) Code() ErrorCode {
+	return e() // panics: invalid memory address or nil pointer dereference
+}
+
+// TestGetErrorCodeWithNilMapCoder guards the map-kind arm of isNilValue's
+// switch: a nil map assigned to Code()'s receiver would otherwise reach the
+// method and panic on write (`e["code"] = ...`) instead of classifying as
+// internal.
+func TestGetErrorCodeWithNilMapCoder(t *testing.T) {
+	var nilCoder nilMapCoder
+	var err error = nilCoder
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v (a nil map Coder must classify as internal, not dereference)", got, ErrCodeInternal)
+	}
+}
+
+// TestGetErrorCodeWithNilChanCoder is the chan-kind counterpart of
+// TestGetErrorCodeWithNilMapCoder.
+func TestGetErrorCodeWithNilChanCoder(t *testing.T) {
+	var nilCoder nilChanCoder
+	var err error = nilCoder
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v (a nil chan Coder must classify as internal, not dereference)", got, ErrCodeInternal)
+	}
+}
+
+// TestGetErrorCodeWithNilFuncCoder is the func-kind counterpart of
+// TestGetErrorCodeWithNilMapCoder.
+func TestGetErrorCodeWithNilFuncCoder(t *testing.T) {
+	var nilCoder nilFuncCoder
+	var err error = nilCoder
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v (a nil func Coder must classify as internal, not dereference)", got, ErrCodeInternal)
+	}
+}
+
 // structCoder is a value-type Coder whose kind (struct) is never nil-capable
 // - isNilValue must fall through to its default case and treat it as not
 // nil, the same way it treats a non-nil pointer, rather than misclassifying
