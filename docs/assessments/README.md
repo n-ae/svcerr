@@ -30,7 +30,7 @@ are created there and indexed here with the next number.
 | 0015 | v1.0.1 | [../assessment-maintainable-architect-v4-v1.0.1.md](../assessment-maintainable-architect-v4-v1.0.1.md) |
 | 0016 | v1.0.1 + HEAD `8ef413c` (cross-review verification) | [../assessment-maintainable-architect-v4-head-2026-07-18.md](../assessment-maintainable-architect-v4-head-2026-07-18.md) |
 | 0017 | v1.0.2 (reconciling two disagreeing Codex reviews) | [../assessment-maintainable-architect-v4-v1.0.2.md](../assessment-maintainable-architect-v4-v1.0.2.md) |
-| 0018 | v1.0.3 + HEAD `171d77a` (reconciling a Codex direct review with a second third-party review); M1 closed in [v1.0.4](https://github.com/n-ae/svcerr/releases/tag/v1.0.4) | [../assessment-maintainable-architect-v4-v1.0.3.md](../assessment-maintainable-architect-v4-v1.0.3.md) |
+| 0018 | v1.0.3 + HEAD `171d77a` (reconciling a Codex direct review with a second third-party review); M1 closed in [v1.0.4](https://github.com/n-ae/svcerr/releases/tag/v1.0.4), adapter requirement bumped in [zerologadapter/v1.0.2](https://github.com/n-ae/svcerr/releases/tag/zerologadapter/v1.0.2) | [../assessment-maintainable-architect-v4-v1.0.3.md](../assessment-maintainable-architect-v4-v1.0.3.md) |
 
 ## Independent reviews and design documents
 
@@ -46,4 +46,4 @@ paths for the same published-link reason.
 | 2026-07-17 | [../v1-design-pass.md](../v1-design-pass.md) | Pre-v1 design pass (stages 0–3), input to 0013 |
 | 2026-07-18 | [../repository-assessment-head-codex-2026-07-18.md](../repository-assessment-head-codex-2026-07-18.md) | Codex direct review of current HEAD (`8ef413c`) |
 | 2026-07-18 | [../repository-assessment-v1.0.2-codex-2026-07-18.md](../repository-assessment-v1.0.2-codex-2026-07-18.md) | Codex direct review of v1.0.2 (zero findings; see 0017 for the adversarial follow-up that found two) |
-| 2026-07-18 | [../current-repository-assessment-2026-07-18.md](../current-repository-assessment-2026-07-18.md) | Codex direct review of HEAD `171d77a` (v1.0.3 + adapter bump; one medium finding, see 0018 for reconciliation with a second review; closed in v1.0.4) |
+| 2026-07-18 | [../current-repository-assessment-2026-07-18.md](../current-repository-assessment-2026-07-18.md) | Codex direct review of HEAD `171d77a` (v1.0.3 + adapter bump; one medium finding, see 0018 for reconciliation with a second review; closed in [v1.0.4](https://github.com/n-ae/svcerr/releases/tag/v1.0.4)/[zerologadapter/v1.0.2](https://github.com/n-ae/svcerr/releases/tag/zerologadapter/v1.0.2)) |
