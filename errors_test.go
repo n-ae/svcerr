@@ -731,6 +731,67 @@ func TestRecaptureStackTraceWithTypedNilCoder(t *testing.T) {
 	RecaptureStackTrace(err, 0) // must not panic
 }
 
+// nilSliceCoder is a non-pointer Coder: a named slice type. Coder is an
+// open extension interface with no requirement that implementers be
+// pointer-backed, so a nil value of this shape must classify the same
+// safe way a typed-nil pointer does rather than panic when isNilValue
+// fails to recognize it as nil.
+type nilSliceCoder []string
+
+func (e nilSliceCoder) Error() string   { return e[0] }
+func (e nilSliceCoder) Code() ErrorCode { return ErrorCode(e[0]) }
+
+// nilSliceStackTracer is the StackTracer analogue of nilSliceCoder.
+type nilSliceStackTracer []string
+
+func (e nilSliceStackTracer) Error() string        { return e[0] }
+func (e nilSliceStackTracer) StackTrace() []string { return []string{e[0]} }
+
+// TestGetErrorCodeWithNilNonPointerCoder guards the same footgun
+// TestGetErrorCodeWithTypedNilCoder does, but for a Coder whose concrete
+// type is a nil slice rather than a nil pointer. isNilValue used to check
+// only reflect.Pointer, so this nil, non-pointer Coder reached Code() and
+// panicked (indexing a nil slice) instead of classifying as internal.
+func TestGetErrorCodeWithNilNonPointerCoder(t *testing.T) {
+	var nilCoder nilSliceCoder
+	var err error = nilCoder
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %v, want %v (a nil non-pointer Coder must classify as internal, not dereference)", got, ErrCodeInternal)
+	}
+}
+
+// TestGetStackTraceWithNilNonPointerCoder is the StackTracer counterpart of
+// TestGetErrorCodeWithNilNonPointerCoder.
+func TestGetStackTraceWithNilNonPointerCoder(t *testing.T) {
+	var nilTracer nilSliceStackTracer
+	var err error = nilTracer
+
+	if got := GetStackTrace(err); got != nil {
+		t.Errorf("GetStackTrace() = %v, want nil for a nil non-pointer StackTracer", got)
+	}
+}
+
+// structCoder is a value-type Coder whose kind (struct) is never nil-capable
+// - isNilValue must fall through to its default case and treat it as not
+// nil, the same way it treats a non-nil pointer, rather than misclassifying
+// a perfectly usable value as absent.
+type structCoder struct{ code ErrorCode }
+
+func (e structCoder) Error() string   { return "struct coded error" }
+func (e structCoder) Code() ErrorCode { return e.code }
+
+// TestGetErrorCodeWithNonNilCapableValueCoder guards isNilValue's default
+// case: a Coder concrete type (like a struct) that reflect can never report
+// as nil must still classify normally instead of being mistaken for nil.
+func TestGetErrorCodeWithNonNilCapableValueCoder(t *testing.T) {
+	var err error = structCoder{code: ErrCodeNotFound}
+
+	if got := GetErrorCode(err); got != ErrCodeNotFound {
+		t.Errorf("GetErrorCode() = %v, want %v (a non-nil-capable value Coder must classify normally)", got, ErrCodeNotFound)
+	}
+}
+
 // minimalCodedUnwrappableError implements Coder, error, and Unwrap, but not
 // StackTracer - to verify getUserFriendlyMessage/UserMessage's safety
 // property (never surface a wrapped cause's text without an explicit

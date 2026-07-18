@@ -1096,7 +1096,7 @@ func outermostCoded(err error) coderError {
 	return nil
 }
 
-// isNilValue reports whether v is an interface holding a nil pointer - the
+// isNilValue reports whether v is an interface holding a nil value - the
 // classic Go footgun where a typed nil assigned to an interface variable
 // compares != nil but panics on any method call that dereferences the
 // (absent) receiver. errors.As matches on type, not nilness, so a
@@ -1104,11 +1104,17 @@ func outermostCoded(err error) coderError {
 // coderError despite being unusable - outermostCoded treats that the same
 // as no match at all. Every built-in error type in this package is a
 // pointer receiver, which is also the idiomatic shape for a custom error
-// type, so a pointer check covers the realistic case without reflect
-// contortions for kinds (map, chan, func) no error type in practice uses.
+// type, but Coder and StackTracer are open interfaces: a caller can
+// implement one on a named slice, map, func, chan, or interface type, so
+// every nil-capable reflect.Kind is checked rather than assuming pointer.
 func isNilValue(v any) bool {
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Pointer && rv.IsNil()
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 // ownMessager is implemented by every BaseError-derived type via
