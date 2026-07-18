@@ -1866,6 +1866,80 @@ func TestRecoveryMiddlewareToleratesNilLogger(t *testing.T) {
 	}
 }
 
+// TestWriteHTTPErrorWithTypedNilCoderDoesNotPanicDuringLogging guards the
+// gap left after GetErrorCode/outermostCoded first filtered typed-nil
+// Coders: errorLogFields still called the unguarded GetStackTrace for any
+// 5xx classification (which is exactly what a typed-nil error normalizes
+// to), so logging - not classification - was the thing that panicked. Runs
+// against both a real Logger and a nil one, since the nil-logger call path
+// reaches errorLogFields before logError's own nil check used to run.
+func TestWriteHTTPErrorWithTypedNilCoderDoesNotPanicDuringLogging(t *testing.T) {
+	var nilNotFound *NotFoundError
+	var err error = nilNotFound
+
+	for name, logger := range map[string]Logger{
+		"recording logger": &recordingLogger{},
+		"nil logger":       nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			WriteHTTPError(w, err, logger) // must not panic
+
+			if w.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want %d for a typed-nil coded error", w.Code, http.StatusInternalServerError)
+			}
+			var resp HTTPErrorResponse
+			if jsonErr := json.Unmarshal(w.Body.Bytes(), &resp); jsonErr != nil {
+				t.Fatalf("body is not valid JSON: %v (body: %s)", jsonErr, w.Body.String())
+			}
+			if resp.Error.Code != ErrCodeInternal {
+				t.Errorf("Error.Code = %v, want %v", resp.Error.Code, ErrCodeInternal)
+			}
+		})
+	}
+}
+
+// TestRecoveryMiddlewareSurvivesATypedNilCoderThroughARealServer is the
+// end-to-end version of the test above: without the GetStackTrace/
+// RecaptureStackTrace guards, a handler that let a typed-nil coded error
+// reach WriteHTTPError would panic during logging *after* the 500 body was
+// already written, and RecoveryMiddleware would treat that second panic as
+// one arriving after response commitment - aborting the connection with
+// http.ErrAbortHandler instead of letting the already-correct response
+// reach the client. A httptest.ResponseRecorder can't observe that failure
+// mode (it has no notion of a committed connection being torn down), so
+// this runs against a real listener the way
+// TestRecoveryMiddleware's informational-header subtest does.
+func TestRecoveryMiddlewareSurvivesATypedNilCoderThroughARealServer(t *testing.T) {
+	logger := &recordingLogger{}
+	handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var nilNotFound *NotFoundError
+		var err error = nilNotFound
+		WriteHTTPError(w, err, logger)
+	}))
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("http.Get() error = %v (the response should have reached the client intact, not been aborted mid-connection)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusInternalServerError)
+	}
+	var errResp HTTPErrorResponse
+	if jsonErr := json.Unmarshal(body, &errResp); jsonErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %s)", jsonErr, body)
+	}
+	if errResp.Error.Code != ErrCodeInternal {
+		t.Errorf("Error.Code = %v, want %v", errResp.Error.Code, ErrCodeInternal)
+	}
+}
+
 func TestPureRenderFunctions(t *testing.T) {
 	// WriteJSON/WriteHTML/WriteProblem mirror their WriteHTTP*
 	// counterparts' body and status exactly, minus the logging call.

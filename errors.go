@@ -503,10 +503,12 @@ type stackTraceSetter interface {
 // function, the trace ends up pointing at that helper instead of its
 // caller. Call RecaptureStackTrace(err, 1) from inside such a helper,
 // immediately after constructing err, to fix that - err must be one of
-// this package's error types (or wrap one); otherwise this is a no-op.
+// this package's error types (or wrap one); otherwise this is a no-op. A
+// typed-nil err (see isNilValue) is also a no-op rather than a panic,
+// matching outermostCoded's treatment of the same case.
 func RecaptureStackTrace(err error, extraSkip int) {
 	var setter stackTraceSetter
-	if !errors.As(err, &setter) {
+	if !errors.As(err, &setter) || isNilValue(setter) {
 		return
 	}
 	setter.setStackTrace(captureStackTrace(2 + extraSkip))
@@ -1129,11 +1131,15 @@ func GetErrorCode(err error) ErrorCode {
 }
 
 // GetStackTrace extracts the stack trace from an error. It only requires
-// StackTracer, not the full ErrorWithCode.
+// StackTracer, not the full ErrorWithCode. A typed-nil StackTracer (see
+// isNilValue) is treated the same as no match at all, matching
+// outermostCoded/GetErrorCode's handling of the same footgun - without this
+// guard, a *BaseError-derived nil pointer assigned to a plain error variable
+// would panic here instead of degrading gracefully.
 func GetStackTrace(err error) []string {
 	var st StackTracer
-	if errors.As(err, &st) {
-		return st.StackTrace()
+	if !errors.As(err, &st) || isNilValue(st) {
+		return nil
 	}
-	return nil
+	return st.StackTrace()
 }

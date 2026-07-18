@@ -77,6 +77,13 @@ func errorLogFields(err error, statusCode int) (Level, map[string]any) {
 // otherwise invisible: WriteHeader/Write don't return to their caller in
 // a way any of this package's writers surface today.
 func logError(logger Logger, err error, statusCode int, renderErr, writeErr error, bytesWritten int) {
+	// Mirrors safeLog's own nil check one level down, but here it also
+	// avoids building fields (including a GetStackTrace call) that a nil
+	// logger will never receive.
+	if logger == nil {
+		return
+	}
+
 	level, fields := errorLogFields(err, statusCode)
 	if renderErr != nil {
 		fields["response_render_error"] = renderErr.Error()

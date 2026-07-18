@@ -694,6 +694,43 @@ func TestGetErrorCodeWithTypedNilCoder(t *testing.T) {
 	}
 }
 
+// TestGetStackTraceWithTypedNilCoder guards the same footgun
+// TestGetErrorCodeWithTypedNilCoder does, at the sibling extraction point:
+// before GetStackTrace filtered a typed-nil StackTracer, it called
+// StackTrace() on the nil receiver and panicked instead of degrading to nil,
+// the same way GetErrorCode used to panic on Code().
+func TestGetStackTraceWithTypedNilCoder(t *testing.T) {
+	var nilBaseErr *BaseError
+	var err error = nilBaseErr
+	if got := GetStackTrace(err); got != nil {
+		t.Errorf("GetStackTrace() = %v, want nil for a typed-nil *BaseError", got)
+	}
+
+	var nilNotFound *NotFoundError
+	err = nilNotFound
+	if got := GetStackTrace(err); got != nil {
+		t.Errorf("GetStackTrace() = %v, want nil for a typed-nil *NotFoundError", got)
+	}
+}
+
+// TestRecaptureStackTraceWithTypedNilCoder guards the third extraction point
+// sharing the same errors.As-then-dereference shape as GetErrorCode and
+// GetStackTrace: before RecaptureStackTrace filtered a typed-nil
+// stackTraceSetter, it called setStackTrace on the nil receiver and
+// panicked instead of no-op'ing like it already does for an err with no
+// setter at all.
+func TestRecaptureStackTraceWithTypedNilCoder(t *testing.T) {
+	var nilBaseErr *BaseError
+	var err error = nilBaseErr
+
+	RecaptureStackTrace(err, 0) // must not panic
+
+	var nilNotFound *NotFoundError
+	err = nilNotFound
+
+	RecaptureStackTrace(err, 0) // must not panic
+}
+
 // minimalCodedUnwrappableError implements Coder, error, and Unwrap, but not
 // StackTracer - to verify getUserFriendlyMessage/UserMessage's safety
 // property (never surface a wrapped cause's text without an explicit
