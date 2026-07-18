@@ -1,9 +1,15 @@
 # Assessments
 
 Maintainable-architect reviews of this package, one per reviewed release.
-Files 0001–0004 predate this directory's `NNNN-` convention and stay at
-their original `docs/` paths because published GitHub release notes link
-them there; new assessments are created here with the next number.
+
+Two homes exist for historical reasons, and this index covers both. Files
+0005–0010 were created in this directory under an `NNNN-` filename
+convention. Every other assessment lives at its original `docs/` path
+under the series' `assessment-maintainable-architect-v4-<version>.md`
+naming, because published GitHub release notes and annotated tag messages
+(the v1.0.0 and v1.0.1 changelogs among them) link those paths directly.
+That root naming is the series' convention going forward; new assessments
+are created there and indexed here with the next number.
 
 | # | Version reviewed | File |
 |---|---|---|
@@ -17,3 +23,21 @@ them there; new assessments are created here with the next number.
 | 0008 | v0.6.3 | [0008-svcerr-v0.6.3-review.md](0008-svcerr-v0.6.3-review.md) |
 | 0009 | v0.6.4 | [0009-svcerr-v0.6.4-closure.md](0009-svcerr-v0.6.4-closure.md) |
 | 0010 | v0.6.5 | [0010-svcerr-v0.6.5-closure.md](0010-svcerr-v0.6.5-closure.md) |
+| 0011 | v0.6.4 (full re-assessment) | [../assessment-maintainable-architect-v4-v0.6.4.md](../assessment-maintainable-architect-v4-v0.6.4.md) |
+| 0012 | v0.9.0 | [../assessment-maintainable-architect-v4-v0.9.0.md](../assessment-maintainable-architect-v4-v0.9.0.md) |
+| 0013 | v1.0.0 candidate | [../assessment-maintainable-architect-v4-v1.0.0-rc.md](../assessment-maintainable-architect-v4-v1.0.0-rc.md) |
+| 0014 | v1.0.0 (with v1.0.1 closure addendum) | [../assessment-maintainable-architect-v4-v1.0.0.md](../assessment-maintainable-architect-v4-v1.0.0.md) |
+| 0015 | v1.0.1 | [../assessment-maintainable-architect-v4-v1.0.1.md](../assessment-maintainable-architect-v4-v1.0.1.md) |
+
+## Independent reviews and design documents
+
+Reviews performed outside the maintainable-architect-v4 series, and the
+design work the series verified against. Kept at their original `docs/`
+paths for the same published-link reason.
+
+| Date | Document | Scope |
+|---|---|---|
+| 2026-07-17 | [../repo-review-2026-07-17.md](../repo-review-2026-07-17.md) | Codex direct review of v0.6.3 |
+| 2026-07-17 | [../repository-assessment-v0.6.4-codex-2026-07-17.md](../repository-assessment-v0.6.4-codex-2026-07-17.md) | Codex direct review of v0.6.4 |
+| 2026-07-17 | [../direct-repository-assessment-v1.0.0-2026-07-17.md](../direct-repository-assessment-v1.0.0-2026-07-17.md) | Codex direct review of v1.0.0 |
+| 2026-07-17 | [../v1-design-pass.md](../v1-design-pass.md) | Pre-v1 design pass (stages 0–3), input to 0013 |
