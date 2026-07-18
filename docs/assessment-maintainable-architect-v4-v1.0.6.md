@@ -63,7 +63,7 @@ past treatment of similar documentation-only nits (e.g. 0019's own
 | Critical / high | 0 | No security, correctness, or response-corruption defect found |
 | Medium | 0 | No reliability or API-contract defect found |
 | Low | 0 | 0019's only open finding (L1, `isNilValue` kind coverage) was already closed in v1.0.5; v1.0.6 adds test coverage only, introducing nothing new |
-| Note, not a finding | 1 | Published GitHub release notes for v1.0.6 say "no source or behavior change from v1.0.4/v1.0.5" — technically imprecise, since v1.0.5 changed source relative to v1.0.4. The annotated git tag itself is already worded precisely. See [below](#release-notes-wording). |
+| Note, not a finding | 1 | Published GitHub release notes for v1.0.6 said "no source or behavior change from v1.0.4/v1.0.5" — technically imprecise, since v1.0.5 changed source relative to v1.0.4. The annotated git tag itself was already worded precisely. **Resolved 2026-07-19 — see [Addendum](#addendum-2026-07-19--release-notes-wording-fixed) below.** The table row and body text that follow describe the point-in-time state when this assessment was first written. |
 | Confirmed unchanged (carried over) | 2 | Context-free `Logger` (ADR 0001) and marshal-panic stack provenance (ADR 0002) — re-confirmed present, no action, not re-litigated this cycle. |
 
 ## Claim-by-claim verification
@@ -160,3 +160,24 @@ None identified. 0019's only open finding (L1) is closed as of v1.0.5 and
 remains closed; v1.0.6 added test coverage only. The release-notes wording
 noted above is optional, zero-risk cleanup, not a priority. ADR 0001 and ADR
 0002 remain correctly dispositioned, not re-opened.
+
+<a id="addendum-2026-07-19--release-notes-wording-fixed"></a>
+## Addendum (2026-07-19) — release notes wording fixed
+
+The GitHub-side divergence noted in [claim 7](#release-notes-wording) is
+resolved. The published v1.0.6 release description's opening line now reads:
+
+> Test-only release: no source or behavior change from v1.0.5.
+
+— identical to the annotated git tag object's wording, which never needed
+correction. Verified via `gh release view v1.0.6 --repo n-ae/svcerr --json
+body -q .body`, which now returns the corrected line; the rest of the release
+body (regression-test rationale, the `reflect.Interface` unreachability
+explanation, "No breaking changes," "Test coverage: 100.0%.") is unchanged
+from the text quoted in claim 7's evidence.
+
+This was optional, zero-risk cleanup by this assessment's own conclusion —
+not something that warranted its own release or code change — and none was
+made; only the GitHub release description text was edited. No finding was
+open here to begin with, so nothing new closes; this addendum exists purely
+to keep the note above from describing a state that no longer holds.
