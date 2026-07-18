@@ -654,6 +654,20 @@ func TestGetErrorCodeWithMinimalCoderType(t *testing.T) {
 	}
 }
 
+// TestGetErrorCodeWithEmptyCoderCode guards a gap normalizeCode's use in New
+// and Wrap didn't close: a third-party Coder-only type - a first-class,
+// documented extension point, not an edge case - can return "" from Code()
+// without going through either constructor. Before GetErrorCode normalized
+// its result too, an empty code from a bare Coder rode straight through to
+// the wire (e.g. HTTPErrorResponse.Error.Code == "").
+func TestGetErrorCodeWithEmptyCoderCode(t *testing.T) {
+	err := &minimalCodedError{code: "", msg: "empty code"}
+
+	if got := GetErrorCode(err); got != ErrCodeInternal {
+		t.Errorf("GetErrorCode() = %q, want %v (an empty external Coder code must normalize, not reach the wire)", got, ErrCodeInternal)
+	}
+}
+
 // TestGetErrorCodeWithTypedNilCoder guards the classic Go footgun: a nil
 // pointer assigned to an error variable produces a non-nil interface value
 // (err == nil is false) whose concrete type still matches errors.As. Before

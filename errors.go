@@ -1109,7 +1109,7 @@ type ownMessager interface {
 // if it doesn't also implement Unwrap or StackTrace.
 func GetErrorCode(err error) ErrorCode {
 	if node := outermostCoded(err); node != nil {
-		return node.Code()
+		return normalizeCode(node.Code())
 	}
 	return ErrCodeInternal
 }

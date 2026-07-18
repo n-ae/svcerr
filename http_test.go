@@ -1138,6 +1138,26 @@ func TestWriteJSONWithTypedNilCodedError(t *testing.T) {
 	}
 }
 
+func TestWriteJSONWithEmptyCoderCode(t *testing.T) {
+	// A bare third-party Coder implementation - the package's own doc
+	// comment advertises this as a first-class extension point, not an
+	// edge case - can return "" from Code() without going through New or
+	// Wrap, whose own empty-code normalization this bypasses. The wire
+	// body must still carry a non-empty code, not "".
+	err := &minimalCodedError{code: "", msg: "empty code"}
+
+	w := httptest.NewRecorder()
+	WriteJSON(w, err)
+
+	var resp HTTPErrorResponse
+	if decErr := json.Unmarshal(w.Body.Bytes(), &resp); decErr != nil {
+		t.Fatalf("body is not valid JSON: %v (body: %q)", decErr, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeInternal {
+		t.Errorf("Error.Code = %q, want %v (an empty external Coder code must not reach the wire)", resp.Error.Code, ErrCodeInternal)
+	}
+}
+
 func TestWriteHTTPErrorLogsRenderFailureOnUnencodableDetail(t *testing.T) {
 	// The client-visible response falls back to a generic INTERNAL_ERROR
 	// (TestWriteJSONFallsBackOnUnencodableDetail), but that alone gives no
