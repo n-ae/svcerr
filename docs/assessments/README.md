@@ -28,6 +28,7 @@ are created there and indexed here with the next number.
 | 0013 | v1.0.0 candidate | [../assessment-maintainable-architect-v4-v1.0.0-rc.md](../assessment-maintainable-architect-v4-v1.0.0-rc.md) |
 | 0014 | v1.0.0 (with v1.0.1 closure addendum) | [../assessment-maintainable-architect-v4-v1.0.0.md](../assessment-maintainable-architect-v4-v1.0.0.md) |
 | 0015 | v1.0.1 | [../assessment-maintainable-architect-v4-v1.0.1.md](../assessment-maintainable-architect-v4-v1.0.1.md) |
+| 0016 | v1.0.1 + HEAD `8ef413c` (cross-review verification) | [../assessment-maintainable-architect-v4-head-2026-07-18.md](../assessment-maintainable-architect-v4-head-2026-07-18.md) |
 
 ## Independent reviews and design documents
 
@@ -41,3 +42,4 @@ paths for the same published-link reason.
 | 2026-07-17 | [../repository-assessment-v0.6.4-codex-2026-07-17.md](../repository-assessment-v0.6.4-codex-2026-07-17.md) | Codex direct review of v0.6.4 |
 | 2026-07-17 | [../direct-repository-assessment-v1.0.0-2026-07-17.md](../direct-repository-assessment-v1.0.0-2026-07-17.md) | Codex direct review of v1.0.0 |
 | 2026-07-17 | [../v1-design-pass.md](../v1-design-pass.md) | Pre-v1 design pass (stages 0–3), input to 0013 |
+| 2026-07-18 | [../repository-assessment-head-codex-2026-07-18.md](../repository-assessment-head-codex-2026-07-18.md) | Codex direct review of current HEAD (`8ef413c`) |

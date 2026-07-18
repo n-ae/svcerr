@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -1387,6 +1389,255 @@ func TestWriteContainsPanickingMarshaler(t *testing.T) {
 	}
 }
 
+// panicErrMarshaler panics with an error value (rather than a string),
+// so a marshal-failure RenderErr can be checked for identity
+// preservation via errors.Is.
+var errPanicMarshalerSentinel = errors.New("marshal boom sentinel")
+
+type panicErrMarshaler struct{}
+
+func (panicErrMarshaler) MarshalJSON() ([]byte, error) { panic(errPanicMarshalerSentinel) }
+
+func TestSafeJSONMarshalPreservesPanicErrorIdentity(t *testing.T) {
+	// assessment head-2026-07-18 L2: a marshaler panicking with an error
+	// value used to be flattened into RenderErr with %v, so
+	// errors.Is(RenderErr, thatError) was always false and the recorded
+	// text carried no way back to the original error. %w must keep it
+	// reachable in the chain.
+	e := New(ErrCodeInvalidInput, "invalid")
+	e.SetPublicDetail("bad", panicErrMarshaler{})
+
+	got := WriteJSONResult(httptest.NewRecorder(), e)
+
+	if !errors.Is(got.RenderErr, errPanicMarshalerSentinel) {
+		t.Errorf("errors.Is(RenderErr, sentinel) = false, want true - RenderErr = %v", got.RenderErr)
+	}
+}
+
+// invalidNilErrMarshaler returns a deliberately truncated, invalid JSON
+// document with a nil error - the shape json.Marshal itself produces for
+// a panic(nil) marshaler under legacy (GODEBUG=panicnil=1) panicnil
+// semantics, where recover() sees nil and safeJSONMarshal's panic
+// recovery never fires. Constructing it directly, instead of only via
+// GODEBUG, makes the guard's own behavior testable deterministically in
+// every mode and independent of any particular Go panicnil default.
+type invalidNilErrMarshaler struct{}
+
+func (invalidNilErrMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`{"truncated":`), nil
+}
+
+func TestMarshalerReturningInvalidBytesWithNilErrorIsCaughtNormally(t *testing.T) {
+	// Documents the boundary safeJSONMarshal's json.Valid guard exists
+	// outside of: encoding/json validates every *returned* Marshaler
+	// output via its own internal compact() call before accepting it, so
+	// a marshaler that returns syntactically invalid bytes - with no
+	// panic at all - is already rejected with a proper, non-nil
+	// json.Marshal error through the ordinary marshal-failure path.
+	// TestSafeJSONMarshalRejectsPanicNilUnderLegacySemantics covers the
+	// one path that bypasses compact() entirely and needs the guard.
+	for _, tc := range []struct {
+		name  string
+		write func(http.ResponseWriter, error) WriteResult
+	}{
+		{"WriteJSONResult", WriteJSONResult},
+		{"WriteProblemResult", WriteProblemResult},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			e := New(ErrCodeInvalidInput, "invalid")
+			e.SetPublicDetail("bad", invalidNilErrMarshaler{})
+
+			got := tc.write(w, e)
+
+			if got.RenderErr == nil {
+				t.Fatal("RenderErr = nil, want an error - json.Marshal itself rejects a marshaler's syntactically invalid output")
+			}
+			if !json.Valid(w.Body.Bytes()) {
+				t.Errorf("response body is not valid JSON: %q (the fallback body must always be well-formed)", w.Body.String())
+			}
+			if got.Status != http.StatusInternalServerError || w.Code != http.StatusInternalServerError {
+				t.Errorf("Status/w.Code = %d/%d, want %d/%d (the standard fallback)", got.Status, w.Code, http.StatusInternalServerError, http.StatusInternalServerError)
+			}
+		})
+	}
+}
+
+// panicNilMarshaler panics with a literal nil, the one construct whose
+// behavior depends on the process's panicnil GODEBUG setting rather
+// than being deterministic on its own.
+type panicNilMarshaler struct{}
+
+func (panicNilMarshaler) MarshalJSON() ([]byte, error) { panic(nil) }
+
+const panicNilSubprocessEnv = "SVCERR_TEST_PANICNIL_SUBPROCESS"
+
+// TestSafeJSONMarshalRejectsPanicNilUnderLegacySemantics exercises
+// safeJSONMarshal's json.Valid guard along the only path that can
+// actually make the real encoding/json.Marshal return (invalidBytes,
+// nil): a custom MarshalJSON that panics with a literal nil, under
+// legacy (GODEBUG=panicnil=1) panicnil semantics. Under those semantics
+// recover() returns nil for a bare panic(nil) - not just in
+// safeJSONMarshal's own defer, but first in encoding/json's own
+// top-level recover inside Marshal, which exists to convert its
+// internal sentinel panics into errors: calling recover() during an
+// active panic always stops it regardless of the value it returns, so
+// that recover silently absorbs the panic without recognizing it (its
+// own "recovered != nil" check is false) and Marshal returns normally -
+// with whatever partial bytes its buffer already held for the fields
+// encoded before the panicking one, and a nil error. The panic never
+// reaches safeJSONMarshal's own recover at all. This is the scenario
+// TestMarshalerReturningInvalidBytesWithNilErrorIsCaughtNormally is not:
+// there, MarshalJSON returns normally and its output is validated by
+// encoding/json's own compact() call; here it never returns at all.
+//
+// GODEBUG=panicnil=1 can only be requested for an entire process, so
+// this re-executes the compiled test binary in a subprocess with it set
+// (the standard library's own tests for GODEBUG-sensitive behavior use
+// the same self-exec pattern) rather than flipping panicnil semantics
+// for this whole package's default test run and every other test in it.
+func TestSafeJSONMarshalRejectsPanicNilUnderLegacySemantics(t *testing.T) {
+	if os.Getenv(panicNilSubprocessEnv) == "1" {
+		e := New(ErrCodeInvalidInput, "bad")
+		e.SetPublicDetail("bad", panicNilMarshaler{})
+		got := WriteJSONResult(httptest.NewRecorder(), e)
+		if got.RenderErr == nil {
+			fmt.Println("FAIL: RenderErr = nil, want an error")
+			os.Exit(1)
+		}
+		if got.Status != http.StatusInternalServerError {
+			fmt.Printf("FAIL: Status = %d, want %d\n", got.Status, http.StatusInternalServerError)
+			os.Exit(1)
+		}
+		fmt.Println("OK")
+		os.Exit(0)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSafeJSONMarshalRejectsPanicNilUnderLegacySemantics$")
+	cmd.Env = append(os.Environ(), panicNilSubprocessEnv+"=1", "GODEBUG=panicnil=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, ok := err.(*exec.Error); ok {
+			t.Skipf("cannot re-exec test binary in this environment: %v", err)
+		}
+		t.Fatalf("subprocess (GODEBUG=panicnil=1) failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "OK") {
+		t.Fatalf("subprocess did not report success:\n%s", out)
+	}
+}
+
+func TestNewAndWrapNormalizeEmptyCode(t *testing.T) {
+	// assessment head-2026-07-18 L3: an empty ErrorCode used to ride
+	// unnoticed all the way to the wire as a broken machine-readable
+	// identifier - New/Wrap are the only entry points that accept a
+	// caller-chosen code with no built-in validation.
+	t.Run("New", func(t *testing.T) {
+		e := New("", "oops")
+		if got := e.Code(); got != ErrCodeInternal {
+			t.Errorf("Code() = %q, want %q", got, ErrCodeInternal)
+		}
+		if got := GetErrorCode(e); got != ErrCodeInternal {
+			t.Errorf("GetErrorCode() = %q, want %q", got, ErrCodeInternal)
+		}
+		w := httptest.NewRecorder()
+		WriteJSON(w, e)
+		var resp HTTPErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("body is not valid JSON: %v", err)
+		}
+		if resp.Error.Code != ErrCodeInternal {
+			t.Errorf("wire code = %q, want %q", resp.Error.Code, ErrCodeInternal)
+		}
+	})
+
+	t.Run("Wrap", func(t *testing.T) {
+		e := Wrap(errors.New("cause"), "", "oops")
+		if got := e.Code(); got != ErrCodeInternal {
+			t.Errorf("Code() = %q, want %q", got, ErrCodeInternal)
+		}
+	})
+
+	t.Run("a non-empty code is left untouched", func(t *testing.T) {
+		if got := New(ErrCodeNotFound, "oops").Code(); got != ErrCodeNotFound {
+			t.Errorf("Code() = %q, want %q", got, ErrCodeNotFound)
+		}
+	})
+}
+
+func TestRegistrationRejectsEmptyCode(t *testing.T) {
+	// assessment head-2026-07-18 L3: since New/Wrap now normalize an
+	// empty code to ErrCodeInternal, a registration entry keyed on ""
+	// could never be reached by this package's own errors and would only
+	// shadow ErrCodeInternal's own mapping for a non-conforming
+	// caller-supplied Coder.
+	t.Run("RegisterStatusCode", func(t *testing.T) {
+		if err := RegisterStatusCode("", http.StatusTeapot); err == nil {
+			t.Error("RegisterStatusCode(\"\", ...) error = nil, want an error")
+		}
+	})
+
+	t.Run("RendererConfig.StatusCodes", func(t *testing.T) {
+		_, err := NewRenderer(RendererConfig{StatusCodes: map[ErrorCode]int{"": http.StatusTeapot}})
+		if err == nil {
+			t.Error("NewRenderer with an empty StatusCodes key error = nil, want an error")
+		}
+	})
+}
+
+func TestProblemTitleFallsBackForNonstandardStatus(t *testing.T) {
+	// assessment head-2026-07-18 L4: a Renderer or RegisterStatusCode may
+	// map any code to any 400-599 status, including one with no
+	// registered http.StatusText reason phrase (e.g. 499) - the RFC 9457
+	// title must not be left blank in that case.
+	const nonstandard = 499
+	r, err := NewRenderer(RendererConfig{StatusCodes: map[ErrorCode]int{"CUSTOM": nonstandard}})
+	if err != nil {
+		t.Fatalf("NewRenderer() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r.Problem(w, New("CUSTOM", "oops"))
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if resp["status"] != float64(nonstandard) {
+		t.Fatalf(`resp["status"] = %v, want %d`, resp["status"], nonstandard)
+	}
+	if title, _ := resp["title"].(string); title == "" {
+		t.Error(`resp["title"] is empty, want a non-empty fallback (http.StatusText(499) has no registered phrase)`)
+	}
+}
+
+func TestProblemTitleFallbackAppliesToTheMarshalFailureFallbackToo(t *testing.T) {
+	// The same nonstandard-status gap exists in fallbackProblemBody when
+	// a Renderer maps ErrCodeInternal itself to a status with no
+	// registered reason phrase and the real body then fails to marshal.
+	const nonstandard = 499
+	r, err := NewRenderer(RendererConfig{StatusCodes: map[ErrorCode]int{ErrCodeInternal: nonstandard}})
+	if err != nil {
+		t.Fatalf("NewRenderer() error = %v", err)
+	}
+	e := New(ErrCodeInvalidInput, "invalid")
+	e.SetPublicDetail("bad", make(chan int))
+
+	w := httptest.NewRecorder()
+	got := r.Problem(w, e)
+	if got.RenderErr == nil {
+		t.Fatal("RenderErr = nil, want the marshal error - this test needs the fallback path")
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if title, _ := resp["title"].(string); title == "" {
+		t.Error(`resp["title"] is empty, want a non-empty fallback`)
+	}
+}
+
 func TestWriteResultFunctionsMirrorTheirIntCounterparts(t *testing.T) {
 	err := NewNotFoundError("league", "1")
 
@@ -2509,6 +2760,40 @@ func TestRecoveryMiddleware(t *testing.T) {
 		}
 		if logger.calls[0].fields["response_committed_status"] != http.StatusOK {
 			t.Errorf("response_committed_status field = %v, want %v", logger.calls[0].fields["response_committed_status"], http.StatusOK)
+		}
+	})
+
+	t.Run("a panic after a committed non-5xx response still logs a stack trace", func(t *testing.T) {
+		// assessment head-2026-07-18 M1: errorLogFields used to gate
+		// stack_trace on tw.status, the handler's *previous* response
+		// status - so a panic after a committed 200 (streaming JSON, SSE,
+		// a download, ...) silently lost the one field this log record
+		// exists to carry. The fields must now be built from the
+		// recovered error's own severity instead, and http_status - which
+		// would otherwise report a fabricated 500 as if a response
+		// carrying it existed - must be absent; response_committed_status
+		// is the actual transport truth.
+		logger := &recordingLogger{}
+		handler := RecoveryMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("partial"))
+			panic("boom after commit")
+		}))
+
+		expectAbortHandler(t, handler, httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+		if len(logger.calls) != 1 {
+			t.Fatalf("logger.calls = %d, want 1", len(logger.calls))
+		}
+		fields := logger.calls[0].fields
+		if _, ok := fields["stack_trace"]; !ok {
+			t.Error(`fields["stack_trace"] missing, want the recovered panic's stack`)
+		}
+		if v, ok := fields["http_status"]; ok {
+			t.Errorf(`fields["http_status"] = %v, want the key entirely absent - no error response was rendered, committed or not`, v)
+		}
+		if fields["response_committed_status"] != http.StatusOK {
+			t.Errorf("response_committed_status = %v, want %d", fields["response_committed_status"], http.StatusOK)
 		}
 	})
 

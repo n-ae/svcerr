@@ -21,8 +21,16 @@ var (
 // ever maps error codes to error responses) - an out-of-range value (0,
 // 200, 999, ...) is rejected here rather than surfacing later as a
 // WriteHeader panic from inside an error handler, which is a far harder
-// place to diagnose it.
+// place to diagnose it. code must be non-empty: New/Wrap already
+// normalize an empty code to ErrCodeInternal, so a registration entry
+// keyed on "" could never be reached by this package's own errors and
+// would only ever be reachable by a caller-supplied Coder that skips
+// New/Wrap's normalization, silently shadowing ErrCodeInternal's own
+// mapping instead of a real code's.
 func RegisterStatusCode(code ErrorCode, status int) error {
+	if code == "" {
+		return fmt.Errorf("svcerr: code must not be empty")
+	}
 	if status < 400 || status > 599 {
 		return fmt.Errorf("svcerr: status must be 400-599, got %d", status)
 	}

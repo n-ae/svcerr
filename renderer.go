@@ -72,6 +72,14 @@ func NewRenderer(cfg RendererConfig) (*Renderer, error) {
 	if len(cfg.StatusCodes) > 0 {
 		codes = make(map[ErrorCode]int, len(cfg.StatusCodes))
 		for code, status := range cfg.StatusCodes {
+			// See RegisterStatusCode: an empty key can never be reached
+			// by this package's own errors (New/Wrap normalize it to
+			// ErrCodeInternal), so it would only ever shadow
+			// ErrCodeInternal's own entry for a caller-supplied Coder
+			// that skips normalization.
+			if code == "" {
+				return nil, fmt.Errorf("svcerr: code must not be empty")
+			}
 			if status < 400 || status > 599 {
 				return nil, fmt.Errorf("svcerr: status for %q must be 400-599, got %d", code, status)
 			}

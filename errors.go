@@ -497,15 +497,34 @@ func RecaptureStackTrace(err error, extraSkip int) {
 	setter.setStackTrace(captureStackTrace(2 + extraSkip))
 }
 
+// normalizeCode maps an empty ErrorCode to ErrCodeInternal - New and Wrap
+// are the only entry points that accept a caller-chosen code with no
+// validation of its own (every semantic constructor hard-codes a real
+// one), so an empty string would otherwise ride unnoticed all the way to
+// the wire as a broken machine-readable identifier: "" as both the
+// classification key a client is meant to switch on and the
+// RegisterStatusCode/StatusCodes lookup key (falling through to the
+// generic default status rather than any deliberate mapping). Normalizing
+// here, at construction, matches this package's existing house style of
+// clamping invalid input at the entry point rather than re-validating at
+// every emission site (see the RetryAfter clamps).
+func normalizeCode(code ErrorCode) ErrorCode {
+	if code == "" {
+		return ErrCodeInternal
+	}
+	return code
+}
+
 // New creates a generic error with the given code and message. Prefer the
 // semantic constructors below (NewValidationError, NewNotFoundError, ...)
 // when one exists for what you're representing; use New directly for codes
 // that have no dedicated constructor, e.g. ErrCodeMissingRequired,
 // ErrCodeDatabaseConnection, ErrCodeDatabaseTransaction,
 // ErrCodeDatabaseMigration, ErrCodeResourceConflict, or ErrCodeQuotaExceeded.
+// An empty code is normalized to ErrCodeInternal.
 func New(code ErrorCode, message string) *BaseError {
 	return &BaseError{
-		code:    code,
+		code:    normalizeCode(code),
 		message: message,
 		pcs:     captureStackTrace(2),
 	}
@@ -513,10 +532,11 @@ func New(code ErrorCode, message string) *BaseError {
 
 // Wrap wraps err as a generic error with the given code and message. As
 // with the semantic Wrap* constructors, err's text is never shown to
-// clients unless SetPublicMessage is called explicitly.
+// clients unless SetPublicMessage is called explicitly. An empty code is
+// normalized to ErrCodeInternal.
 func Wrap(err error, code ErrorCode, message string) *BaseError {
 	return &BaseError{
-		code:    code,
+		code:    normalizeCode(code),
 		message: message,
 		cause:   err,
 		pcs:     captureStackTrace(2),

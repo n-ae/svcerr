@@ -12,6 +12,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default already (repository setting), but that default is
+# mutable repo/org state, not something this file controls - declaring it
+# here means a copied repository, a changed org default, or this workflow
+# restored in another context can't silently inherit broader permissions
+# (assessment head-2026-07-18 L5, Codex).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

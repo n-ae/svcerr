@@ -2,6 +2,7 @@ package svcerr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -117,25 +118,55 @@ func checkedWrite(w http.ResponseWriter, body []byte) (int, error) {
 	return n, err
 }
 
-// safeJSONMarshal wraps json.Marshal, additionally converting a panic
-// from a caller-supplied json.Marshaler into an error. encoding/json
-// recovers its own internal sentinel panics but deliberately re-panics
-// any other value, including one raised inside a custom MarshalJSON -
-// so a diagnostic value attached via SetPublicDetail could otherwise
-// take down the very writer that exists to report failures. The same
-// policy already governs the package's other caller-supplied
-// collaborator: safeLog contains a panicking Logger for the same
-// reason. The recovered panic becomes a RenderErr and engages the
-// standard marshal-failure fallback, degrading exactly like any other
-// unencodable value instead of escaping the response path.
+// safeJSONMarshal wraps json.Marshal with two additional guarantees
+// json.Marshal alone doesn't make: a panic from a caller-supplied
+// json.Marshaler becomes an error, and a nil error always means body is
+// actually valid JSON.
+//
+// encoding/json recovers its own internal sentinel panics but
+// deliberately re-panics any other value, including one raised inside a
+// custom MarshalJSON - so a diagnostic value attached via
+// SetPublicDetail could otherwise take down the very writer that exists
+// to report failures. The same policy already governs the package's
+// other caller-supplied collaborator: safeLog contains a panicking
+// Logger for the same reason. When the panic value is itself an error,
+// %w preserves it in the chain (errors.Is/As still reach it through
+// RenderErr) instead of flattening it to text with %v. The recovered
+// panic becomes a RenderErr and engages the standard marshal-failure
+// fallback, degrading exactly like any other unencodable value instead
+// of escaping the response path.
+//
+// json.Valid(body) after a nil error guards a narrower gap: under
+// legacy panicnil semantics (GODEBUG=panicnil=1, or a consumer's own
+// main module predating Go 1.21 - see recoveryMiddleware's doc comment
+// for the same GODEBUG dependency), recover() returns nil for a literal
+// panic(nil) inside a custom MarshalJSON, so the panic above goes
+// undetected - but json.Marshal has already written a truncated,
+// invalid document to its internal buffer and returns it with a nil
+// error, because the encoder's own recovery only catches its own
+// sentinel type. Without this check that broken body would be reported
+// as a fully successful, fully written response. json.Valid is checked
+// unconditionally, not only after a recovered panic, since any future
+// encoder or wrapped Marshaler misbehaving the same way (returning
+// malformed bytes with a nil error, panic or not) hits the identical
+// invariant.
 func safeJSONMarshal(v any) (body []byte, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			body = nil
-			err = fmt.Errorf("svcerr: JSON marshaler panicked: %v", rec)
+			if recErr, ok := rec.(error); ok {
+				err = fmt.Errorf("svcerr: JSON marshaler panicked: %w", recErr)
+			} else {
+				err = fmt.Errorf("svcerr: JSON marshaler panicked: %v", rec)
+			}
 		}
 	}()
-	return json.Marshal(v)
+
+	body, err = json.Marshal(v)
+	if err == nil && !json.Valid(body) {
+		return nil, errors.New("svcerr: json.Marshal returned invalid JSON")
+	}
+	return body, err
 }
 
 // renderSettings bundles the configuration one response rendering uses:
@@ -419,8 +450,14 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, s renderSettings) (s
 	// also a reasonable default alongside a custom Type, but
 	// SetProblemTitle overrides it for a caller who wants a title that
 	// actually describes their custom problem type rather than the HTTP
-	// status in general.
-	title := http.StatusText(statusCode)
+	// status in general. http.StatusText returns "" for a status outside
+	// its registered table - reachable here because a Renderer or
+	// RegisterStatusCode may map any code to any 400-599 status,
+	// including a nonstandard one (499, an application-specific 5xx,
+	// ...) - so an empty result falls back to the same occurrence-
+	// invariant per-code text the JSON/HTML bodies already use, rather
+	// than shipping a blank RFC 9457 title.
+	title := titleForStatus(statusCode, code)
 	if pt, ok := node.(ProblemTitler); ok {
 		if custom, set := pt.ProblemTitle(); set {
 			title = custom
@@ -453,16 +490,28 @@ func writeProblemJSONBody(w http.ResponseWriter, err error, s renderSettings) (s
 }
 
 // fallbackProblemBody mirrors fallbackErrorBody for the problem+json body -
-// built from fixed fields and http.StatusText, never from err or any
+// built from fixed fields and titleForStatus, never from err or any
 // caller-supplied detail value, so json.Marshal here cannot itself fail.
 func fallbackProblemBody(statusCode int) []byte {
 	body, _ := json.Marshal(ProblemDetails{
 		Type:   "about:blank",
-		Title:  http.StatusText(statusCode),
+		Title:  titleForStatus(statusCode, ErrCodeInternal),
 		Status: statusCode,
 		Code:   ErrCodeInternal,
 	})
 	return body
+}
+
+// titleForStatus returns http.StatusText(statusCode), falling back to
+// code's occurrence-invariant default message when the status has no
+// registered reason phrase (e.g. a nonstandard status a Renderer or
+// RegisterStatusCode mapped code to) - see writeProblemJSONBody's doc
+// comment for why an empty title would otherwise be reachable.
+func titleForStatus(statusCode int, code ErrorCode) string {
+	if title := http.StatusText(statusCode); title != "" {
+		return title
+	}
+	return defaultMessageForCode(code)
 }
 
 // UserMessage returns the safe, user-facing message for an error - the same

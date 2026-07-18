@@ -74,7 +74,24 @@ func recoveryMiddleware(logger Logger, settings func() renderSettings) func(http
 					// it closes the HTTP/1 connection (or resets the
 					// HTTP/2 stream) without an additional "http: panic
 					// serving" log line, unlike a bare re-panic of rec.
-					_, fields := errorLogFields(err, tw.status)
+					//
+					// Fields are built from err's own severity
+					// (http.StatusInternalServerError - err is always this
+					// package's own WrapInternalError/NewInternalError,
+					// always 5xx-classified), not from tw.status: no error
+					// response was rendered here, committed or hijacked, so
+					// the "status" errorLogFields would otherwise report is
+					// fictitious either way - and gating stack_trace on it
+					// as if it were a rendered-response status previously
+					// meant a panic after a committed non-5xx response (a
+					// plain 200, say) or a hijack (status 0) silently lost
+					// the one field this log record exists to carry.
+					// http_status is deleted for the same reason: it would
+					// report the fabricated 500 as if a response carrying
+					// it existed. response_committed_status (or hijacked)
+					// is the actual, transport-level truth in its place.
+					_, fields := errorLogFields(err, http.StatusInternalServerError)
+					delete(fields, "http_status")
 					fields["panic"] = rec
 					fields["method"] = r.Method
 					fields["path"] = r.URL.Path
@@ -82,13 +99,12 @@ func recoveryMiddleware(logger Logger, settings func() renderSettings) func(http
 					if tw.hijacked {
 						// Commitment came from a successful Hijack, not a
 						// written status - tw.status is 0, and reporting a
-						// zero as response_committed_status or http_status
-						// would look like data during an incident. Say what
-						// happened instead: no HTTP status applies to a
-						// hijacked response. The hijacked connection stays
-						// untouched: the handler owns it (see commitOnHijack).
+						// zero as response_committed_status would look like
+						// data during an incident. Say what happened
+						// instead: no HTTP status applies to a hijacked
+						// response. The hijacked connection stays untouched:
+						// the handler owns it (see commitOnHijack).
 						fields["hijacked"] = true
-						delete(fields, "http_status")
 						msg = "Panic recovered in HTTP handler after connection was hijacked"
 					} else {
 						fields["response_committed_status"] = tw.status

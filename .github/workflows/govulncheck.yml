@@ -12,6 +12,14 @@ on:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC - off the top of the hour to dodge scheduler congestion
   workflow_dispatch:
 
+# Read-only by default already (repository setting), but that default is
+# mutable repo/org state, not something this file controls - declaring it
+# here means a copied repository, a changed org default, or this workflow
+# restored in another context can't silently inherit broader permissions
+# (assessment head-2026-07-18 L5, Codex).
+permissions:
+  contents: read
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -35,6 +43,14 @@ jobs:
           go-version: stable
           cache: true
       - name: Run govulncheck
+        # Pinned rather than @latest: the advisory database already
+        # varies run to run by design (that's the point of the
+        # schedule), and floating the scanner binary too would add a
+        # second, independent source of change - the same commit and
+        # database state could then scan differently after a new scanner
+        # release, with no way to tell which one moved. Bump deliberately,
+        # as part of dependency maintenance (assessment head-2026-07-18
+        # L5, Codex).
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
